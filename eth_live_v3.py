@@ -1,22 +1,33 @@
 """
-MASTER SCALPER - Live Trading OTIMIZADO - ETH [V5.2 - CORREÇÃO TP3 + AUTO LIVE]
+MASTER SCALPER - Live Trading OTIMIZADO - ETH [V6.0 - CORREÇÕES CRÍTICAS]
 
-✅ V5.2 - CORREÇÕES:
-   - Compatibilidade com estados antigos (fallbacks)
+✅ V6.0 - CORREÇÕES CRÍTICAS (2025):
+   🔴 CRÍTICO - TP3: Agora verifica após TP2 (bugfix lógica)
+   🔴 CRÍTICO - Symbol: Adicionado como parâmetro do construtor
+   🔴 CRÍTICO - Testnet: Removido hardcoded False, usa .env
+
+   🟡 IMPORTANTE:
+   - Preço sempre atualizado quando há posição (ticker real-time)
+   - Persistência de highest/lowest price para trailing stop
+   - Retry logic com exponential backoff (3 tentativas)
+   - Validações de segurança (min qty, SL/TP válidos)
+
+   🟢 COMPATIBILIDADE:
+   - Fallbacks para estados antigos (V5.x)
    - Inicialização automática de campos faltantes
-   - Validações de existência em todas as funções
 
 ✅ LÓGICA DO BACKTEST IMPLEMENTADA:
    - TP1 (0.7x ATR): Fecha 60% + Move SL para BE
    - TP2 (1.3x ATR): Ativa trailing stop local
-   - TP3 (2.0x ATR): Fecha 40% restante
+   - TP3 (2.0x ATR): Fecha 40% restante APÓS TP2
    - Trailing Stop: Atualiza SL continuamente após TP2
    - Gestão manual via API Bybit
 
-✅ Loop constante monitorando preço
-✅ Parciais executadas via API
-✅ Exit Price via Execution History
-✅ Notificações Telegram completas
+✅ FEATURES:
+   - Loop constante monitorando preço (5s com posição, 30s sem)
+   - Parciais executadas via API com retry
+   - Validações de segurança completas
+   - Notificações Telegram detalhadas
 """
 
 import sys
@@ -148,6 +159,34 @@ def get_position_size_usd(rest, symbol: str) -> float:
     except Exception as e:
         logger.warning(f'get_position_size_usd: {e}')
     return 0.0
+
+def retry_with_backoff(func, max_retries: int = 3, initial_delay: float = 1.0, max_delay: float = 16.0):
+    """
+    Executa função com retry exponential backoff
+    Args:
+        func: Função a executar (sem argumentos)
+        max_retries: Número máximo de tentativas
+        initial_delay: Delay inicial em segundos
+        max_delay: Delay máximo em segundos
+    Returns:
+        Resultado da função ou None se falhar
+    """
+    delay = initial_delay
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                logger.warning(f"Tentativa {attempt + 1}/{max_retries} falhou: {e}. Retry em {delay}s...")
+                time.sleep(delay)
+                delay = min(delay * 2, max_delay)
+            else:
+                logger.error(f"Todas as {max_retries} tentativas falharam: {last_error}")
+
+    return None
 
 
 STATE_FILE = "storage/bot_state_eth.json"
@@ -309,12 +348,9 @@ def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 class MasterLiveTrader:
-    def __init__(self, config: dict, model_path: str, telegram: TelegramNotifier):
-                # === LIVE MODE OVERRIDE (no testnet) ===
-        self.bybit_testnet = False
-        self.is_live_mode = True
-        # ========================================
+    def __init__(self, config: dict, model_path: str, telegram: TelegramNotifier, symbol: str = 'ETHUSDT'):
         self.config = config
+        self.symbol = symbol
         self.model_path = Path(model_path)
         self.telegram = telegram
 
@@ -335,12 +371,12 @@ class MasterLiveTrader:
         atr_sl_value = float(os.getenv('ATR_MULT_SL', '1.5'))
         self.atr_mult_sl = atr_sl_value
 
-        # LIVE MODE CHECK - Detecta automaticamente do .env
-        # Se BYBIT_TESTNET=false, então está em LIVE mode
+        # Configuração de modo (testnet vs live)
+        self.bybit_testnet = os.getenv('BYBIT_TESTNET', 'true').lower() == 'true'
         self.is_live_mode = not self.bybit_testnet
 
         logger.info("="*70)
-        logger.info("📋 CONFIGURAÇÕES - ETH [V5.2 PARCIAIS + COMPAT]")
+        logger.info("📋 CONFIGURAÇÕES - ETH [V6.0 CORREÇÕES CRÍTICAS]")
         logger.info("="*70)
         logger.info(f"Estratégia: TP1 parcial → BE → Trailing")
         logger.info(f"Modelo: {self.model_path.name}")
@@ -353,7 +389,7 @@ class MasterLiveTrader:
         logger.info(f"TP3: {TP_MULTS['tp3']}x ATR (fecha resto)")
         logger.info(f"Trailing Distance: {TRAILING_STOP_DISTANCE}x ATR")
         logger.info(f"Monitor Interval: {MONITOR_INTERVAL}s")
-        logger.info(f"✅ V5.2: Compatível com estados antigos")
+        logger.info(f"✅ V6.0: Correções críticas + Retry logic + Validações")
         logger.info("="*70)
 
         self.position = None
@@ -368,17 +404,17 @@ class MasterLiveTrader:
         self.highest_price = None
         self.lowest_price = None
 
-        self.bybit_testnet = os.getenv('BYBIT_TESTNET', 'true').lower() == 'true'
+        # Inicializa cliente Bybit com configuração correta
         self.rest_client = BybitRESTClient(
             api_key=os.getenv('BYBIT_API_KEY'),
             api_secret=os.getenv('BYBIT_API_SECRET'),
-            testnet=False
+            testnet=self.bybit_testnet
         )
 
         
         # Market meta + execution band
         try:
-            self.tick_size, self.qty_step, self.min_qty = fetch_market_meta(self.rest_client, symbol)
+            self.tick_size, self.qty_step, self.min_qty = fetch_market_meta(self.rest_client, self.symbol)
         except Exception:
             self.tick_size, self.qty_step, self.min_qty = 0.01, 0.001, 0.001
         self.price_band_bps = float(os.getenv('PRICE_BAND_BPS', '5'))  # default 5 bps
@@ -456,9 +492,23 @@ class MasterLiveTrader:
                     self.position['atr'] = entry * 0.01  # Estimativa: 1% do preço
                     logger.warning("⚠️ Campo 'atr' não encontrado - estimado em 1% do preço de entrada")
 
+                # ✅ Inicializa highest/lowest se não existirem (para trailing stop)
+                direction = self.position.get('direction', 'long')
+                if self.highest_price is None and direction == 'long':
+                    self.highest_price = self.position.get('entry_price', 0)
+                    logger.warning("⚠️ highest_price inicializado com entry_price")
+                if self.lowest_price is None and direction == 'short':
+                    self.lowest_price = self.position.get('entry_price', 0)
+                    logger.warning("⚠️ lowest_price inicializado com entry_price")
+
                 logger.info(f"🔄 Recovered {self.position['direction']} @ ${self.position['entry_price']:,.2f}")
                 logger.info(f"   Remaining: {self.position['remaining_qty']:.2f} ETH")
                 logger.info(f"   TP1 Hit: {self.tp1_hit} | TP2 Hit: {self.tp2_hit} | Trailing: {self.trailing_active}")
+                if self.trailing_active:
+                    if direction == 'long':
+                        logger.info(f"   Highest Price: ${self.highest_price:,.2f}")
+                    else:
+                        logger.info(f"   Lowest Price: ${self.lowest_price:,.2f}")
 
         except Exception as e:
             logger.warning(f"Recover failed: {e}")
@@ -563,7 +613,33 @@ class MasterLiveTrader:
         price = round_price(price, tick)
         actual_size_usd = qty * price
 
-        logger.info(f"📊 Position: {qty} ETH = ${actual_size_usd:,.2f}")
+        # ✅ VALIDAÇÕES DE SEGURANÇA
+        if qty < min_qty:
+            logger.error(f"❌ Quantidade {qty} menor que mínimo {min_qty}!")
+            return
+
+        if actual_size_usd < 10:
+            logger.warning(f"⚠️ Tamanho muito pequeno: ${actual_size_usd:.2f} < $10")
+            return
+
+        # Valida que SL faz sentido (não pode ser igual ou pior que entrada)
+        if direction == 'long' and sl >= price:
+            logger.error(f"❌ SL inválido para LONG: ${sl:.2f} >= ${price:.2f}")
+            return
+        if direction == 'short' and sl <= price:
+            logger.error(f"❌ SL inválido para SHORT: ${sl:.2f} <= ${price:.2f}")
+            return
+
+        # Valida que TPs fazem sentido
+        if direction == 'long' and (tp1 <= price or tp2 <= tp1 or tp3 <= tp2):
+            logger.error(f"❌ TPs inválidos para LONG")
+            return
+        if direction == 'short' and (tp1 >= price or tp2 >= tp1 or tp3 >= tp2):
+            logger.error(f"❌ TPs inválidos para SHORT")
+            return
+
+        logger.info(f"📊 Position: {qty} {symbol.replace('USDT', '')} = ${actual_size_usd:,.2f}")
+        logger.info(f"✅ Validações de segurança: OK")
 
         order_id = None
         actual_entry_price = price
@@ -680,17 +756,17 @@ class MasterLiveTrader:
         self.save_state()
 
     def close_partial(self, qty_to_close: float, price: float, reason: str) -> bool:
-        """Fecha parcial da posição"""
+        """Fecha parcial da posição com retry"""
         if not self.position or not self.is_live_mode:
             return False
 
-        try:
-            symbol = self.position['symbol']
-            direction = self.position['direction']
-            side = 'Sell' if direction == 'long' else 'Buy'
+        symbol = self.position['symbol']
+        direction = self.position['direction']
+        side = 'Sell' if direction == 'long' else 'Buy'
 
-            logger.info(f"📤 Closing {qty_to_close} ETH at ${price:,.2f}...")
+        logger.info(f"📤 Closing {qty_to_close} {symbol.replace('USDT', '')} at ${price:,.2f}...")
 
+        def _place_partial_order():
             order = self.rest_client.place_order(
                 symbol=symbol,
                 side=side,
@@ -704,23 +780,21 @@ class MasterLiveTrader:
                 return True
             else:
                 error = order.get('retMsg', 'Unknown') if order else 'No response'
-                logger.error(f"❌ Failed partial: {error}")
-                return False
+                raise Exception(f"API error: {error}")
 
-        except Exception as e:
-            logger.error(f"❌ Exception closing partial: {e}")
-            return False
+        # ✅ Usa retry com backoff (máx 3 tentativas)
+        result = retry_with_backoff(_place_partial_order, max_retries=3, initial_delay=2.0)
+        return result is not None and result
 
     def update_stop_loss(self, new_sl: float) -> bool:
-        """Atualiza stop loss na Bybit"""
+        """Atualiza stop loss na Bybit com retry"""
         if not self.position or not self.is_live_mode:
             return False
 
-        try:
-            symbol = self.position['symbol']
+        symbol = self.position['symbol']
+        logger.info(f"🔄 Updating SL to ${new_sl:,.2f}...")
 
-            logger.info(f"🔄 Updating SL to ${new_sl:,.2f}...")
-
+        def _update_sl():
             result = self.rest_client.set_trading_stop(
                 category='linear',
                 symbol=symbol,
@@ -734,12 +808,11 @@ class MasterLiveTrader:
                 return True
             else:
                 error = result.get('retMsg', 'Unknown') if result else 'No response'
-                logger.error(f"❌ Failed SL update: {error}")
-                return False
+                raise Exception(f"API error: {error}")
 
-        except Exception as e:
-            logger.error(f"❌ Exception updating SL: {e}")
-            return False
+        # ✅ Usa retry com backoff (máx 3 tentativas)
+        result = retry_with_backoff(_update_sl, max_retries=3, initial_delay=2.0)
+        return result is not None and result
 
     def monitor_position(self, current_price: float):
         """
@@ -835,9 +908,10 @@ class MasterLiveTrader:
 
                 self.save_state()
 
-        # ✅ VERIFICA TP3 (FECHA RESTO)
-        if self.tp1_hit and not self.trailing_active:
-            tp3_hit = (direction == 'long' and current_price >= tp3) or                       (direction == 'short' and current_price <= tp3)
+        # ✅ VERIFICA TP3 (FECHA RESTO) - Corrigido: verifica após TP2
+        if self.tp1_hit and self.tp2_hit:
+            tp3_hit = (direction == 'long' and current_price >= tp3) or \
+                      (direction == 'short' and current_price <= tp3)
 
             if tp3_hit:
                 logger.info(f"🎯 TP3 ATINGIDO! ${current_price:,.2f} - FECHANDO RESTO")
@@ -1048,9 +1122,9 @@ class MasterLiveTrader:
     def run(self, symbol: str, check_interval: int = 30):
         """Main loop com monitoramento constante"""
         mode_str = "💰 LIVE MODE" if self.is_live_mode else "📝 PAPER MODE"
-        logger.info(f"🚀 MASTER SCALPER BOT - ETH [V5.2 PARCIAIS + COMPAT] ({mode_str})")
+        logger.info(f"🚀 MASTER SCALPER BOT - ETH [V6.0 CORREÇÕES CRÍTICAS] ({mode_str})")
 
-        self.telegram.send_message(f"""🤖 BOT ETH INICIADO [V5.2 - PARCIAIS + COMPAT]
+        self.telegram.send_message(f"""🤖 BOT ETH INICIADO [V6.0 - CORREÇÕES CRÍTICAS]
 
 Modo: {mode_str}
 🎯 Confidence: {self.min_confidence:.0%}
@@ -1063,7 +1137,7 @@ Modo: {mode_str}
 • TP3 ou Trailing: Fecha resto
 
 ⏱️ Monitor: {MONITOR_INTERVAL}s quando há posição
-✅ Compatível com estados antigos""")
+✅ V6.0: Correções críticas + Validações + Retry""")
 
         self.recover_state()
 
@@ -1079,7 +1153,27 @@ Modo: {mode_str}
                     # Define intervalo: rápido com posição, lento sem
                     current_interval = MONITOR_INTERVAL if self.position else check_interval
 
-                    # Busca dados apenas periodicamente
+                    # ✅ Se há posição, SEMPRE busca preço atual via ticker (rápido)
+                    if self.position:
+                        try:
+                            _, _, last_price = get_best_quotes(self.rest_client, symbol)
+                            if last_price and last_price > 0:
+                                price = last_price
+                            else:
+                                # Fallback: usa último preço salvo
+                                price = self.position.get('last_price', 0)
+                                if price == 0:
+                                    logger.warning("⚠️ Não conseguiu obter preço atual")
+                                    time.sleep(current_interval)
+                                    continue
+                        except Exception as e:
+                            logger.warning(f"⚠️ Erro ao buscar ticker: {e}")
+                            price = self.position.get('last_price', 0)
+                            if price == 0:
+                                time.sleep(current_interval)
+                                continue
+
+                    # Busca dados completos apenas periodicamente (para sinais)
                     if now - last_data_fetch >= check_interval:
                         iteration_count += 1
                         logger.info("="*70)
@@ -1094,17 +1188,12 @@ Modo: {mode_str}
                             continue
 
                         current = df.iloc[-1]
-                        price = current['close']
+                        # Se não há posição, usa preço do dataframe
+                        if not self.position:
+                            price = current['close']
                         last_data_fetch = now
 
                         logger.info(f"📊 Price: ${price:,.2f}")
-
-                    else:
-                        # Usa último preço conhecido
-                        price = self.position.get('last_price', 0) if self.position else 0
-                        if price == 0:
-                            time.sleep(current_interval)
-                            continue
 
                     # Salva último preço
                     if self.position:
@@ -1203,7 +1292,7 @@ Modo: {mode_str}
 def main():
     global logger
 
-    parser = argparse.ArgumentParser(description='MASTER SCALPER - ETH [V5.2 PARCIAIS + COMPAT]')
+    parser = argparse.ArgumentParser(description='MASTER SCALPER - ETH [V6.0 CORREÇÕES CRÍTICAS]')
     parser.add_argument('--symbol', default='ETHUSDT', help='Trading symbol')
     parser.add_argument('--model', default='ml_model_master_scalper_365d.pkl', help='Model filename')
     parser.add_argument('--interval', type=int, default=30, help='Check interval (no position)')
@@ -1227,7 +1316,7 @@ def main():
         return
 
     try:
-        trader = MasterLiveTrader(config, model_path, telegram)
+        trader = MasterLiveTrader(config, model_path, telegram, symbol=args.symbol)
         trader.run(args.symbol, args.interval)
 
     except Exception as e:
