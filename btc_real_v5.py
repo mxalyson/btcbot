@@ -1,16 +1,18 @@
 """
-MASTER SCALPER - BTC [V5 SIMPLIFICADO]
+MASTER SCALPER - BTC [V6.0 SIMPLIFICADO - CORREÇÕES TÉCNICAS]
 
-✅ LÓGICA SIMPLES:
+✅ V6.0 - CORREÇÕES TÉCNICAS:
+   🔴 Symbol como parâmetro do construtor
+   🔴 fetch_market_meta() com tick correto para BTC (0.1)
+   🔴 Validações de segurança completas
+   🔴 Retry logic com exponential backoff
+   🔴 Arredondamento correto (Decimal)
+
+✅ LÓGICA SIMPLES (mantida):
    - Apenas SL + TP1
    - Gerenciamento 100% pela Bybit
    - Bot só monitora se posição fechou
-
-✅ CORREÇÕES:
    - Rate limit: espera 10s entre requisições
-   - Exit price: usa last_price ao invés de get_executions
-   - Não fecha posição "do nada" (apenas monitora)
-   - Compatível com estados antigos
 """
 
 import sys
@@ -42,6 +44,108 @@ from core.features import FeatureStore
 
 logger = None
 
+# ======== EXECUTION HELPERS: tick/step rounding + fetch_market_meta ========
+from decimal import Decimal, ROUND_DOWN, getcontext
+getcontext().prec = 28
+
+def _to_decimal(x):
+    try:
+        return Decimal(str(x))
+    except:
+        return Decimal(0)
+
+def round_to_step(value: float, step: float) -> float:
+    step_d = _to_decimal(step)
+    if step_d <= 0:
+        return float(value)
+    v = _to_decimal(value)
+    q = (v // step_d) * step_d
+    return float(q)
+
+def round_price(value: float, tick: float) -> float:
+    return round_to_step(value, tick)
+
+def round_qty(value: float, step: float, min_qty: float) -> float:
+    q = round_to_step(value, step)
+    if q < min_qty:
+        q = _to_decimal(min_qty)
+    return float(q)
+
+def fetch_market_meta(rest, symbol: str):
+    """
+    Fetch tickSize, qtyStep, minOrderQty from instruments. Fallbacks if API unavailable.
+    Usa valores hardcoded otimizados para ETHUSDT/BTCUSDT se API falhar.
+    """
+    # Valores padrão otimizados por símbolo
+    if 'ETH' in symbol:
+        tick = 0.01    # ETHUSDT tick size
+        step = 0.01    # ETHUSDT qty step (0.01 ETH)
+        min_qty = 0.01 # Mínimo 0.01 ETH
+    elif 'BTC' in symbol:
+        tick = 0.1     # BTCUSDT tick size
+        step = 0.001   # BTCUSDT qty step (0.001 BTC)
+        min_qty = 0.001 # Mínimo 0.001 BTC
+    else:
+        tick = 0.01
+        step = 0.01
+        min_qty = 0.01
+
+    try:
+        # Usa o método correto do BybitRESTClient (verificado em core/bybit_rest.py:184)
+        meta = rest.get_instruments_info(symbol=symbol)
+
+        if meta and meta.get('retCode') == 0:
+            lst = meta.get('result', {}).get('list', [])
+            if lst:
+                info = lst[0]
+                if 'priceFilter' in info and 'tickSize' in info['priceFilter']:
+                    tick = float(info['priceFilter']['tickSize'])
+                if 'lotSizeFilter' in info:
+                    lf = info['lotSizeFilter']
+                    if 'qtyStep' in lf:
+                        step = float(lf['qtyStep'])
+                    if 'minOrderQty' in lf:
+                        min_qty = float(lf['minOrderQty'])
+                logger.info(f"✅ Market meta via API: tick={tick}, step={step}, min_qty={min_qty}")
+        else:
+            retMsg = meta.get('retMsg', 'Unknown error') if meta else 'No response'
+            logger.warning(f'⚠️ API retornou erro: {retMsg}. Usando fallback.')
+    except AttributeError as e:
+        logger.warning(f'⚠️ Método get_instruments_info não disponível: {e}. Usando fallback.')
+    except Exception as e:
+        logger.warning(f'⚠️ fetch_market_meta usando fallback ({e.__class__.__name__}: {e})')
+
+    return tick, step, min_qty
+
+def retry_with_backoff(func, max_retries: int = 3, initial_delay: float = 1.0, max_delay: float = 16.0):
+    """
+    Executa função com retry exponential backoff
+    Args:
+        func: Função a executar (sem argumentos)
+        max_retries: Número máximo de tentativas
+        initial_delay: Delay inicial em segundos
+        max_delay: Delay máximo em segundos
+    Returns:
+        Resultado da função ou None se falhar
+    """
+    delay = initial_delay
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                logger.warning(f"Tentativa {attempt + 1}/{max_retries} falhou: {e}. Retry em {delay}s...")
+                time.sleep(delay)
+                delay = min(delay * 2, max_delay)
+            else:
+                logger.error(f"Todas as {max_retries} tentativas falharam: {last_error}")
+
+    return None
+
+
 STATE_FILE = "storage/bot_state_btc.json"
 
 # Rate limiting
@@ -71,12 +175,12 @@ class TelegramNotifier:
         message = f"""{direction_emoji} NOVA OPERAÇÃO {mode}
 
 Direção: {trade['direction'].upper()}
-Entrada: ${trade['entry_price']:,.2f}
-Tamanho: {trade.get('qty', 'N/A')} BTC
-Confiança: {trade['ml_confidence']*100:.1f}%
+Entrada: ${trade['entry_price']:,.1f}
+Tamanho: {trade.get('qty', 'N/A')} BTC (${trade.get('size', 0):,.2f})
+Confiança ML: {trade['ml_confidence']*100:.1f}%
 
-SL: ${trade['stop_loss']:,.2f}
-TP1: ${trade['tp1']:,.2f}
+🛑 SL: ${trade['stop_loss']:,.1f}
+🎯 TP1: ${trade['tp1']:,.1f}
 
 Order ID: {trade.get('order_id', 'N/A')}"""
         self.send_message(message)
@@ -85,14 +189,21 @@ Order ID: {trade.get('order_id', 'N/A')}"""
         result = "✅" if pnl_amount > 0 else "❌"
         mode = "📝 PAPER" if trade.get('is_paper', False) else "💰 REAL"
 
+        reason_map = {
+            'stop_loss': '🛑 Stop Loss',
+            'take_profit_1': '🎯 TP1',
+            'trailing_stop': '📈 Trailing Stop'
+        }
+        reason_display = reason_map.get(trade['exit_reason'], trade['exit_reason'])
+
         message = f"""{result} FECHADO {mode}
 
 Direção: {trade['direction'].upper()}
-Entrada: ${trade['entry_price']:,.2f}
-Saída: ${trade['exit_price']:,.2f}
+Entrada: ${trade['entry_price']:,.1f}
+Saída: ${trade['exit_price']:,.1f}
 
-PnL: ${pnl_amount:+,.2f} ({pnl_pct:+.2f}%)
-Motivo: {trade['exit_reason']}"""
+💰 PnL: ${pnl_amount:+,.2f} ({pnl_pct:+.2f}%)
+📌 Motivo: {reason_display}"""
         self.send_message(message)
 
     def send_error(self, error_msg: str):
@@ -135,8 +246,9 @@ def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 class MasterLiveTrader:
-    def __init__(self, config: dict, model_path: str, telegram: TelegramNotifier):
+    def __init__(self, config: dict, model_path: str, telegram: TelegramNotifier, symbol: str = 'BTCUSDT'):
         self.config = config
+        self.symbol = symbol
         self.model_path = Path(model_path)
         self.telegram = telegram
 
@@ -158,8 +270,9 @@ class MasterLiveTrader:
         self.paper_mode = os.getenv('PAPER_MODE', 'true').lower() == 'true'
 
         logger.info("="*70)
-        logger.info("📋 CONFIGURAÇÕES - BTC [V5 SIMPLIFICADO]")
+        logger.info("📋 CONFIGURAÇÕES - BTC [V6.0 SIMPLIFICADO + CORREÇÕES]")
         logger.info("="*70)
+        logger.info(f"Símbolo: {self.symbol}")
         logger.info(f"Modelo: {self.model_path.name}")
         logger.info(f"Features: {len(self.feature_names)}")
         logger.info(f"Capital Inicial: ${self.initial_capital:,.2f}")
@@ -169,6 +282,7 @@ class MasterLiveTrader:
         logger.info(f"✅ Apenas SL + TP1 (sem TP2/TP3)")
         logger.info(f"✅ Gerenciamento pela Bybit")
         logger.info(f"✅ Rate limit: {MIN_REQUEST_INTERVAL}s")
+        logger.info(f"✅ V6.0: Validações + Retry + Arredondamento correto")
         logger.info("="*70)
 
         self.position = None
@@ -183,6 +297,16 @@ class MasterLiveTrader:
             api_secret=os.getenv('BYBIT_API_SECRET'),
             testnet=self.bybit_testnet
         )
+
+        # ✅ Busca market meta (tick_size, qty_step, min_qty)
+        try:
+            self.tick_size, self.qty_step, self.min_qty = fetch_market_meta(self.rest_client, self.symbol)
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao buscar market meta: {e}. Usando fallback.")
+            # Fallback específico para BTCUSDT
+            self.tick_size = 0.1
+            self.qty_step = 0.001
+            self.min_qty = 0.001
 
         self.dm = DataManager(self.rest_client)
         self.fs = FeatureStore(config)
@@ -339,9 +463,45 @@ class MasterLiveTrader:
             side = 'Sell'
 
         qty_btc = self.calculate_position_size(price, sl)
+
+        # ✅ Arredondamento correto usando market meta
+        tick = getattr(self, 'tick_size', 0.1)
+        step = getattr(self, 'qty_step', 0.001)
+        min_qty = getattr(self, 'min_qty', 0.001)
+
+        sl = round_price(sl, tick)
+        tp1 = round_price(tp1, tick)
+        qty_btc = round_qty(qty_btc, step, min_qty)
+        price = round_price(price, tick)
         size_usd = qty_btc * price
 
+        # ✅ VALIDAÇÕES DE SEGURANÇA
+        if qty_btc < min_qty:
+            logger.error(f"❌ Quantidade {qty_btc} BTC menor que mínimo {min_qty}!")
+            return
+
+        if size_usd < 10:
+            logger.warning(f"⚠️ Tamanho muito pequeno: ${size_usd:,.2f} < $10")
+            return
+
+        # Valida que SL faz sentido
+        if direction == 'long' and sl >= price:
+            logger.error(f"❌ SL inválido para LONG: ${sl:,.2f} >= ${price:,.2f}")
+            return
+        if direction == 'short' and sl <= price:
+            logger.error(f"❌ SL inválido para SHORT: ${sl:,.2f} <= ${price:,.2f}")
+            return
+
+        # Valida que TP1 faz sentido
+        if direction == 'long' and tp1 <= price:
+            logger.error(f"❌ TP1 inválido para LONG: ${tp1:,.2f} <= ${price:,.2f}")
+            return
+        if direction == 'short' and tp1 >= price:
+            logger.error(f"❌ TP1 inválido para SHORT: ${tp1:,.2f} >= ${price:,.2f}")
+            return
+
         logger.info(f"📊 Position: {qty_btc} BTC = ${size_usd:,.2f}")
+        logger.info(f"✅ Validações de segurança: OK")
 
         order_id = None
         actual_entry_price = price
@@ -374,27 +534,29 @@ class MasterLiveTrader:
                                 except:
                                     actual_entry_price = price
 
-                        # ✅ CONFIGURA SL + TP1
-                        try:
-                            logger.info(f"📍 Setting SL/TP1...")
-                            logger.info(f"   SL: ${sl:,.2f} | TP1: ${tp1:,.2f}")
+                        # ✅ CONFIGURA SL + TP1 com retry
+                        logger.info(f"📍 Setting SL/TP1...")
+                        logger.info(f"   SL: ${sl:,.1f} | TP1: ${tp1:,.1f}")
 
+                        def _set_sl_tp():
                             sl_tp_result = self.rest_client.set_trading_stop(
                                 category='linear',
                                 symbol=symbol,
-                                stopLoss=str(round(sl, 2)),
-                                takeProfit=str(round(tp1, 2)),
+                                stopLoss=str(sl),
+                                takeProfit=str(tp1),
                                 positionIdx=0
                             )
 
                             if sl_tp_result and 'retCode' in sl_tp_result and sl_tp_result['retCode'] == 0:
                                 logger.info(f"✅ SL/TP1 configured!")
+                                return True
                             else:
                                 error_msg = sl_tp_result.get('retMsg', 'Unknown')
-                                logger.error(f"❌ Failed SL/TP: {error_msg}")
+                                raise Exception(f"API error: {error_msg}")
 
-                        except Exception as e:
-                            logger.error(f"⚠️ Failed SL/TP: {e}")
+                        result = retry_with_backoff(_set_sl_tp, max_retries=3, initial_delay=2.0)
+                        if not result:
+                            logger.error(f"❌ Failed to set SL/TP after retries!")
 
                 else:
                     raise Exception("API error")
@@ -422,9 +584,10 @@ class MasterLiveTrader:
         self.last_price = price
 
         mode_str = "📝 PAPER" if is_paper else "💰 REAL"
-        logger.info(f"🟢 OPENED {direction.upper()} {mode_str} @ ${actual_entry_price:,.2f}")
+        logger.info(f"🟢 OPENED {direction.upper()} {mode_str} @ ${actual_entry_price:,.1f}")
         logger.info(f"   Qty: {qty_btc} BTC | Size: ${size_usd:,.2f}")
-        logger.info(f"   SL: ${sl:,.2f} | TP1: ${tp1:,.2f}")
+        logger.info(f"   SL: ${sl:,.1f} | TP1: ${tp1:,.1f}")
+        logger.info(f"   ML Confidence: {ml_confidence:.1%}")
 
         try:
             self.telegram.send_trade_open(self.position)
@@ -572,18 +735,25 @@ class MasterLiveTrader:
     def run(self, symbol: str, check_interval: int = 30):
         """Main loop"""
         mode_str = "📝 PAPER MODE" if self.paper_mode else "💰 REAL TRADING"
-        logger.info(f"🚀 MASTER SCALPER BOT - BTC [V5 SIMPLIFIED] ({mode_str})")
+        network_str = "TESTNET" if self.bybit_testnet else "MAINNET"
+        logger.info(f"🚀 MASTER SCALPER BOT - BTC [V6.0 SIMPLIFICADO] ({mode_str} - {network_str})")
 
-        self.telegram.send_message(f"""🤖 BOT BTC INICIADO [V5 SIMPLIFICADO]
+        self.telegram.send_message(f"""🤖 BOT BTC INICIADO [V6.0 - CORREÇÕES TÉCNICAS]
 
-Modo: {mode_str}
-Confiança Min: {self.min_confidence:.0%}
-Risco/Trade: {self.risk_per_trade:.1%}
-Loop: {check_interval}s
+Símbolo: {self.symbol}
+Modo: {mode_str} ({network_str})
+🎯 Confidence Min: {self.min_confidence:.0%}
+💰 Risco/Trade: {self.risk_per_trade:.1%}
+⏱️ Loop: {check_interval}s
 
-✅ Apenas SL + TP1
-✅ Gerenciado pela Bybit
-✅ Rate limit protegido""")
+📊 Estratégia:
+• SL: 2.0x ATR
+• TP1: 1.0x ATR (gerenciado pela Bybit)
+
+✅ Validações de segurança
+✅ Retry logic (3 tentativas)
+✅ Rate limit protegido ({MIN_REQUEST_INTERVAL}s)
+✅ Arredondamento correto (tick={self.tick_size}, step={self.qty_step})""")
 
         self.recover_state()
 
@@ -698,7 +868,7 @@ Loop: {check_interval}s
 def main():
     global logger
 
-    parser = argparse.ArgumentParser(description='MASTER SCALPER - BTC [V5 SIMPLIFIED]')
+    parser = argparse.ArgumentParser(description='MASTER SCALPER - BTC [V6.0 SIMPLIFICADO + CORREÇÕES]')
     parser.add_argument('--symbol', default='BTCUSDT', help='Trading symbol')
     parser.add_argument('--model', default='ml_model_master_scalper_365d.pkl', help='Model filename')
     parser.add_argument('--interval', type=int, default=30, help='Check interval')
@@ -722,7 +892,7 @@ def main():
         return
 
     try:
-        trader = MasterLiveTrader(config, model_path, telegram)
+        trader = MasterLiveTrader(config, model_path, telegram, symbol=args.symbol)
         trader.run(args.symbol, args.interval)
 
     except Exception as e:
