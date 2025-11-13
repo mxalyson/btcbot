@@ -88,12 +88,36 @@ def round_qty(value: float, step: float, min_qty: float) -> float:
     return float(q)
 
 def fetch_market_meta(rest, symbol: str):
-    """Fetch tickSize, qtyStep, minOrderQty from instruments. Fallbacks if API unavailable."""
-    tick = 0.01
-    step = 0.001
-    min_qty = 0.001
+    """
+    Fetch tickSize, qtyStep, minOrderQty from instruments. Fallbacks if API unavailable.
+    Usa valores hardcoded otimizados para ETHUSDT/BTCUSDT se API falhar.
+    """
+    # Valores padrão otimizados por símbolo
+    if 'ETH' in symbol:
+        tick = 0.01    # ETHUSDT tick size
+        step = 0.01    # ETHUSDT qty step (0.01 ETH)
+        min_qty = 0.01 # Mínimo 0.01 ETH
+    elif 'BTC' in symbol:
+        tick = 0.1     # BTCUSDT tick size
+        step = 0.001   # BTCUSDT qty step (0.001 BTC)
+        min_qty = 0.001 # Mínimo 0.001 BTC
+    else:
+        tick = 0.01
+        step = 0.01
+        min_qty = 0.01
+
     try:
-        meta = rest.get_instruments(category='linear', symbol=symbol)
+        # Tenta diferentes métodos do BybitRESTClient
+        if hasattr(rest, 'get_instruments_info'):
+            meta = rest.get_instruments_info(category='linear', symbol=symbol)
+        elif hasattr(rest, 'get_instrument_info'):
+            meta = rest.get_instrument_info(category='linear', symbol=symbol)
+        elif hasattr(rest, '_get'):
+            # Chamada direta à API V5
+            meta = rest._get('/v5/market/instruments-info', {'category': 'linear', 'symbol': symbol})
+        else:
+            raise AttributeError("Nenhum método de instruments disponível")
+
         if meta and meta.get('retCode') == 0:
             lst = meta.get('result', {}).get('list', [])
             if lst:
@@ -106,8 +130,10 @@ def fetch_market_meta(rest, symbol: str):
                         step = float(lf['qtyStep'])
                     if 'minOrderQty' in lf:
                         min_qty = float(lf['minOrderQty'])
+                logger.info(f"✅ Market meta via API: tick={tick}, step={step}, min_qty={min_qty}")
     except Exception as e:
-        logger.warning(f'fetch_market_meta fallback: {e}')
+        logger.warning(f'⚠️ fetch_market_meta usando fallback ({e.__class__.__name__}): tick={tick}, step={step}, min_qty={min_qty}')
+
     return tick, step, min_qty
 
 def get_best_quotes(rest, symbol: str):
