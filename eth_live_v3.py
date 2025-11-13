@@ -107,16 +107,8 @@ def fetch_market_meta(rest, symbol: str):
         min_qty = 0.01
 
     try:
-        # Tenta diferentes métodos do BybitRESTClient
-        if hasattr(rest, 'get_instruments_info'):
-            meta = rest.get_instruments_info(category='linear', symbol=symbol)
-        elif hasattr(rest, 'get_instrument_info'):
-            meta = rest.get_instrument_info(category='linear', symbol=symbol)
-        elif hasattr(rest, '_get'):
-            # Chamada direta à API V5
-            meta = rest._get('/v5/market/instruments-info', {'category': 'linear', 'symbol': symbol})
-        else:
-            raise AttributeError("Nenhum método de instruments disponível")
+        # Usa o método correto do BybitRESTClient (verificado em core/bybit_rest.py:184)
+        meta = rest.get_instruments_info(symbol=symbol)
 
         if meta and meta.get('retCode') == 0:
             lst = meta.get('result', {}).get('list', [])
@@ -131,8 +123,13 @@ def fetch_market_meta(rest, symbol: str):
                     if 'minOrderQty' in lf:
                         min_qty = float(lf['minOrderQty'])
                 logger.info(f"✅ Market meta via API: tick={tick}, step={step}, min_qty={min_qty}")
+        else:
+            retMsg = meta.get('retMsg', 'Unknown error') if meta else 'No response'
+            logger.warning(f'⚠️ API retornou erro: {retMsg}. Usando fallback.')
+    except AttributeError as e:
+        logger.warning(f'⚠️ Método get_instruments_info não disponível: {e}. Usando fallback.')
     except Exception as e:
-        logger.warning(f'⚠️ fetch_market_meta usando fallback ({e.__class__.__name__}): tick={tick}, step={step}, min_qty={min_qty}')
+        logger.warning(f'⚠️ fetch_market_meta usando fallback ({e.__class__.__name__}: {e})')
 
     return tick, step, min_qty
 
@@ -153,11 +150,14 @@ def get_best_quotes(rest, symbol: str):
     except Exception as e:
         logger.warning(f'orderbook fallback: {e}')
     try:
-        tk = rest.get_ticker(symbol=symbol)
+        tk = rest.get_tickers(symbol=symbol)
         if tk and tk.get('retCode') == 0:
-            last = float(tk.get('result', {}).get('lastPrice') or 0)
+            result = tk.get('result', {})
+            ticker_list = result.get('list', [])
+            if ticker_list:
+                last = float(ticker_list[0].get('lastPrice', 0))
     except Exception as e:
-        pass
+        logger.warning(f'ticker fallback: {e}')
     return best_bid, best_ask, last
 
 def choose_limit_price(side: str, mark: float, best_bid: float, best_ask: float, band_bps: float, tick: float) -> float:
