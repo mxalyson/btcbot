@@ -325,3 +325,7 @@ class BybitRESTClient:
             'sellLeverage': sell_leverage
         }
         return self._request('POST', '/v5/position/set-leverage', params, signed=True)
+
+    def get_server_time(self) -> Dict:
+        """Get Bybit server time (no authentication required)."""
+        return self._request('GET', '/v5/market/time', {})
