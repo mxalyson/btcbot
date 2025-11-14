@@ -226,7 +226,8 @@ class BybitRESTClient:
                     take_profit: Optional[float] = None,
                     reduce_only: bool = False,
                     order_link_id: Optional[str] = None,
-                    timeInForce: Optional[str] = None) -> Dict:
+                    timeInForce: Optional[str] = None,
+                    reduceOnly: Optional[bool] = None) -> Dict:
         """
         Place order (requires authentication).
 
@@ -238,10 +239,14 @@ class BybitRESTClient:
             price: Limit price (required for Limit orders)
             stop_loss: Stop loss price
             take_profit: Take profit price
-            reduce_only: Reduce only flag
+            reduce_only: Reduce only flag (snake_case)
+            reduceOnly: Reduce only flag (camelCase, for backwards compatibility)
             order_link_id: User-defined order ID
             timeInForce: GTC (default), IOC, FOK (for Limit orders)
         """
+        # Support both reduce_only and reduceOnly
+        actual_reduce_only = reduceOnly if reduceOnly is not None else reduce_only
+
         params = {
             'category': 'linear',
             'symbol': symbol,
@@ -256,7 +261,7 @@ class BybitRESTClient:
             params['stopLoss'] = str(stop_loss)
         if take_profit:
             params['takeProfit'] = str(take_profit)
-        if reduce_only:
+        if actual_reduce_only:
             params['reduceOnly'] = True
         if order_link_id:
             params['orderLinkId'] = order_link_id
