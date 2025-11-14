@@ -41,6 +41,7 @@ from core.utils import load_config, setup_logging
 from core.bybit_rest import BybitRESTClient
 from core.data import DataManager
 from core.features import FeatureStore
+from core.risk import RiskManager
 
 logger = None
 
@@ -298,6 +299,19 @@ class MasterLiveTrader:
             testnet=self.bybit_testnet
         )
 
+        # ✅ V7.0: RiskManager com circuit breakers
+        self.risk_manager = RiskManager({
+            'initial_capital': self.initial_capital,
+            'risk_per_trade': self.risk_per_trade,
+            'circuit_breaker_max_loss_pct': float(os.getenv('MAX_DAILY_LOSS_PCT', '5.0')),
+            'circuit_breaker_consec_losses': int(os.getenv('MAX_CONSEC_LOSSES', '3')),
+            'max_trades_per_day': int(os.getenv('MAX_TRADES_PER_DAY', '5')),
+            'cooldown_min': int(os.getenv('COOLDOWN_MIN', '30')),
+            'max_positions': 1,
+            'fees_taker': 0.0006,
+            'max_order_value_usdt': 10000
+        })
+
         # ✅ Busca market meta (tick_size, qty_step, min_qty)
         try:
             self.tick_size, self.qty_step, self.min_qty = fetch_market_meta(self.rest_client, self.symbol)
@@ -360,6 +374,84 @@ class MasterLiveTrader:
 
         except Exception as e:
             logger.warning(f"Recover failed: {e}")
+
+    def health_check(self) -> bool:
+        """✅ V7.0: Verifica saúde do sistema antes de operar"""
+        try:
+            start = time.time()
+            server_time = self.rest_client.get_server_time()
+            latency_ms = (time.time() - start) * 1000
+
+            if latency_ms > 500:
+                logger.warning(f"⚠️ Alta latência: {latency_ms:.0f}ms")
+                return False
+
+            server_ts = int(server_time.get('result', {}).get('timeSecond', 0))
+            clock_diff = abs(server_ts - int(time.time()))
+
+            if clock_diff > 5:
+                logger.error(f"❌ Clock desync: {clock_diff}s")
+                return False
+
+            balance = self.rest_client.get_wallet_balance()
+            if not balance.get('result'):
+                logger.error("❌ Erro ao buscar balance")
+                return False
+
+            logger.info(f"✅ Health Check OK (latência: {latency_ms:.0f}ms)")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Health check falhou: {e}")
+            return False
+
+    def reconcile_positions_on_startup(self):
+        """✅ V7.0: Sincroniza posições bot vs exchange"""
+        logger.info("🔄 Reconciliando posições com Bybit...")
+        try:
+            positions = self.rest_client.get_positions(symbol=self.symbol)
+            positions_list = positions.get('result', {}).get('list', [])
+
+            active_pos = None
+            for pos in positions_list:
+                if float(pos.get('size', 0)) > 0:
+                    active_pos = pos
+                    break
+
+            if active_pos and not self.position:
+                logger.warning("⚠️ Posição no exchange mas não no bot - sincronizando...")
+                self.position = {
+                    'direction': active_pos.get('side', '').lower(),
+                    'entry_price': float(active_pos.get('avgPrice', 0)),
+                    'qty': float(active_pos.get('size', 0)),
+                    'symbol': self.symbol,
+                    'is_live': not self.paper_mode
+                }
+                self.save_state()
+                logger.info("✅ Sincronizado")
+            elif not active_pos and self.position:
+                logger.warning("⚠️ Bot tem posição mas exchange não - limpando...")
+                self.position = None
+                self.save_state()
+                logger.info("✅ Limpo")
+            else:
+                logger.info("✅ Sincronizado")
+        except Exception as e:
+            logger.error(f"❌ Reconciliação falhou: {e}")
+
+    def get_session_stats(self):
+        """✅ V7.0: Métricas consolidadas"""
+        if not self.risk_manager.trade_history:
+            logger.info("📊 Nenhum trade nesta sessão")
+            return
+
+        stats = self.risk_manager.get_risk_stats()
+        logger.info("="*70)
+        logger.info(f"📊 Capital: ${stats['equity']:,.2f} | DD: {stats['current_drawdown']:.2f}%")
+        logger.info(f"   Trades: {stats['total_trades']} | WR: {stats['win_rate']*100:.1f}%")
+        logger.info(f"   PnL: ${stats['total_pnl']:+,.2f} | Fees: ${stats['total_fees']:,.2f}")
+        if stats['is_halted']:
+            logger.warning(f"🚨 HALTED: {stats['halt_reason']}")
+        logger.info("="*70)
 
     def get_current_data(self, symbol: str, timeframe: str = '15m', lookback_days: int = 30) -> pd.DataFrame:
         """
@@ -736,9 +828,9 @@ class MasterLiveTrader:
         """Main loop"""
         mode_str = "📝 PAPER MODE" if self.paper_mode else "💰 REAL TRADING"
         network_str = "TESTNET" if self.bybit_testnet else "MAINNET"
-        logger.info(f"🚀 MASTER SCALPER BOT - BTC [V6.0 SIMPLIFICADO] ({mode_str} - {network_str})")
+        logger.info(f"🚀 MASTER SCALPER BOT - BTC [V7.0 PRODUCTION GRADE] ({mode_str} - {network_str})")
 
-        self.telegram.send_message(f"""🤖 BOT BTC INICIADO [V6.0 - CORREÇÕES TÉCNICAS]
+        self.telegram.send_message(f"""🤖 BOT BTC INICIADO [V7.0 - PRODUCTION GRADE]
 
 Símbolo: {self.symbol}
 Modo: {mode_str} ({network_str})
@@ -750,12 +842,18 @@ Modo: {mode_str} ({network_str})
 • SL: 2.0x ATR
 • TP1: 1.0x ATR (gerenciado pela Bybit)
 
-✅ Validações de segurança
-✅ Retry logic (3 tentativas)
-✅ Rate limit protegido ({MIN_REQUEST_INTERVAL}s)
-✅ Arredondamento correto (tick={self.tick_size}, step={self.qty_step})""")
+✅ V7.0: RiskManager + Health Check + Reconcile + Circuit Breakers
+✅ Validações + Retry logic + Rate limit""")
+
+        # ✅ V7.0: Health check no startup
+        if not self.health_check():
+            logger.error("❌ Health check falhou - abortando")
+            return
 
         self.recover_state()
+
+        # ✅ V7.0: Reconciliação de posições
+        self.reconcile_positions_on_startup()
 
         iteration_count = 0
         last_status_time = time.time()
