@@ -561,8 +561,13 @@ class MasterLiveTrader:
             server_time = self.rest_client.get_server_time()
             latency_ms = (time.time() - start) * 1000
 
-            if latency_ms > 500:
+            # ⚠️ Avisa se latência alta mas continua
+            if latency_ms > 1000:
                 logger.warning(f"⚠️ Alta latência: {latency_ms:.0f}ms")
+
+            # ❌ Aborta apenas se latência crítica (>2s)
+            if latency_ms > 2000:
+                logger.error(f"❌ Latência crítica: {latency_ms:.0f}ms - abortando")
                 return False
 
             server_ts = int(server_time.get('result', {}).get('timeSecond', 0))
