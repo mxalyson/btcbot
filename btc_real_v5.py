@@ -375,39 +375,77 @@ class MasterLiveTrader:
         except Exception as e:
             logger.warning(f"Recover failed: {e}")
 
-    def health_check(self) -> bool:
-        """✅ V7.0: Verifica saúde do sistema antes de operar"""
-        try:
-            start = time.time()
-            server_time = self.rest_client.get_server_time()
-            latency_ms = (time.time() - start) * 1000
+    def health_check(self, max_retries: int = 5, retry_delay: int = 5) -> bool:
+        """
+        ✅ V7.0: Verifica saúde do sistema antes de operar
+        Tenta múltiplas vezes se latência alta ou erro temporário
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    logger.info(f"🔄 Health check tentativa {attempt}/{max_retries}...")
 
-            # ⚠️ Avisa se latência alta mas continua
-            if latency_ms > 1000:
-                logger.warning(f"⚠️ Alta latência: {latency_ms:.0f}ms")
+                start = time.time()
+                server_time = self.rest_client.get_server_time()
+                latency_ms = (time.time() - start) * 1000
 
-            # ❌ Aborta apenas se latência crítica (>2s)
-            if latency_ms > 2000:
-                logger.error(f"❌ Latência crítica: {latency_ms:.0f}ms - abortando")
-                return False
+                # ⚠️ Avisa se latência alta
+                if latency_ms > 1000:
+                    logger.warning(f"⚠️ Alta latência: {latency_ms:.0f}ms")
+                    if attempt < max_retries:
+                        logger.info(f"⏳ Aguardando {retry_delay}s antes de tentar novamente...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(f"❌ Latência alta após {max_retries} tentativas - abortando")
+                        return False
 
-            server_ts = int(server_time.get('result', {}).get('timeSecond', 0))
-            clock_diff = abs(server_ts - int(time.time()))
+                # ❌ Latência crítica (>3s) - não vale a pena continuar
+                if latency_ms > 3000:
+                    logger.error(f"❌ Latência crítica: {latency_ms:.0f}ms")
+                    if attempt < max_retries:
+                        logger.info(f"⏳ Aguardando {retry_delay}s antes de tentar novamente...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(f"❌ Latência crítica após {max_retries} tentativas - abortando")
+                        return False
 
-            if clock_diff > 5:
-                logger.error(f"❌ Clock desync: {clock_diff}s")
-                return False
+                server_ts = int(server_time.get('result', {}).get('timeSecond', 0))
+                clock_diff = abs(server_ts - int(time.time()))
 
-            balance = self.rest_client.get_wallet_balance()
-            if not balance.get('result'):
-                logger.error("❌ Erro ao buscar balance")
-                return False
+                if clock_diff > 5:
+                    logger.error(f"❌ Clock desync: {clock_diff}s")
+                    if attempt < max_retries:
+                        logger.info(f"⏳ Aguardando {retry_delay}s antes de tentar novamente...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        return False
 
-            logger.info(f"✅ Health Check OK (latência: {latency_ms:.0f}ms)")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Health check falhou: {e}")
-            return False
+                balance = self.rest_client.get_wallet_balance()
+                if not balance.get('result'):
+                    logger.error("❌ Erro ao buscar balance")
+                    if attempt < max_retries:
+                        logger.info(f"⏳ Aguardando {retry_delay}s antes de tentar novamente...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        return False
+
+                logger.info(f"✅ Health Check OK (latência: {latency_ms:.0f}ms)")
+                return True
+
+            except Exception as e:
+                logger.error(f"❌ Health check falhou: {e}")
+                if attempt < max_retries:
+                    logger.info(f"⏳ Aguardando {retry_delay}s antes de tentar novamente...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    return False
+
+        return False
 
     def reconcile_positions_on_startup(self):
         """✅ V7.0: Sincroniza posições bot vs exchange"""
