@@ -194,12 +194,22 @@ class BybitRESTClient:
             params['symbol'] = symbol
         return self._request('GET', '/v5/market/tickers', params)
     
-    def get_orderbook(self, symbol: str, limit: int = 25) -> Dict:
-        """Get orderbook depth."""
+    def get_orderbook(self, symbol: str, limit: int = 25, depth: Optional[int] = None) -> Dict:
+        """
+        Get orderbook depth.
+
+        Args:
+            symbol: Trading symbol
+            limit: Number of price levels (default 25)
+            depth: Alias for limit (for backwards compatibility)
+        """
+        # Support both 'limit' and 'depth' parameters
+        actual_limit = depth if depth is not None else limit
+
         params = {
             'category': 'linear',
             'symbol': symbol,
-            'limit': limit
+            'limit': actual_limit
         }
         return self._request('GET', '/v5/market/orderbook', params)
     
@@ -215,8 +225,23 @@ class BybitRESTClient:
                     stop_loss: Optional[float] = None,
                     take_profit: Optional[float] = None,
                     reduce_only: bool = False,
-                    order_link_id: Optional[str] = None) -> Dict:
-        """Place order (requires authentication)."""
+                    order_link_id: Optional[str] = None,
+                    timeInForce: Optional[str] = None) -> Dict:
+        """
+        Place order (requires authentication).
+
+        Args:
+            symbol: Trading symbol
+            side: Buy or Sell
+            order_type: Market, Limit
+            qty: Order quantity
+            price: Limit price (required for Limit orders)
+            stop_loss: Stop loss price
+            take_profit: Take profit price
+            reduce_only: Reduce only flag
+            order_link_id: User-defined order ID
+            timeInForce: GTC (default), IOC, FOK (for Limit orders)
+        """
         params = {
             'category': 'linear',
             'symbol': symbol,
@@ -224,7 +249,7 @@ class BybitRESTClient:
             'orderType': order_type,
             'qty': str(qty)
         }
-        
+
         if price:
             params['price'] = str(price)
         if stop_loss:
@@ -235,7 +260,9 @@ class BybitRESTClient:
             params['reduceOnly'] = True
         if order_link_id:
             params['orderLinkId'] = order_link_id
-        
+        if timeInForce:
+            params['timeInForce'] = timeInForce
+
         return self._request('POST', '/v5/order/create', params, signed=True)
     
     def set_trading_stop(self, category: str, symbol: str, 
