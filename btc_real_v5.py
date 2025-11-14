@@ -630,25 +630,45 @@ class MasterLiveTrader:
                         logger.info(f"📍 Setting SL/TP1...")
                         logger.info(f"   SL: ${sl:,.1f} | TP1: ${tp1:,.1f}")
 
-                        def _set_sl_tp():
-                            sl_tp_result = self.rest_client.set_trading_stop(
-                                category='linear',
-                                symbol=symbol,
-                                stopLoss=str(sl),
-                                takeProfit=str(tp1),
-                                positionIdx=0
-                            )
+                        # ⏳ Aguarda posição ser criada no exchange (critical fix!)
+                        logger.info("⏳ Aguardando posição ser criada no exchange...")
+                        time.sleep(3)  # 3 segundos para Bybit processar
 
-                            if sl_tp_result and 'retCode' in sl_tp_result and sl_tp_result['retCode'] == 0:
-                                logger.info(f"✅ SL/TP1 configured!")
-                                return True
-                            else:
-                                error_msg = sl_tp_result.get('retMsg', 'Unknown')
-                                raise Exception(f"API error: {error_msg}")
+                        # Verifica se posição foi criada
+                        position_exists = False
+                        try:
+                            positions = self.rest_client.get_positions(symbol=symbol)
+                            positions_list = positions.get('result', {}).get('list', [])
+                            for pos in positions_list:
+                                if float(pos.get('size', 0)) > 0:
+                                    position_exists = True
+                                    logger.info(f"✅ Posição confirmada: {pos.get('size')} BTC")
+                                    break
+                        except Exception as e:
+                            logger.warning(f"⚠️ Erro ao verificar posição: {e}")
 
-                        result = retry_with_backoff(_set_sl_tp, max_retries=3, initial_delay=2.0)
-                        if not result:
-                            logger.error(f"❌ Failed to set SL/TP after retries!")
+                        if not position_exists:
+                            logger.error(f"❌ Posição não foi criada - não é possível configurar SL/TP!")
+                        else:
+                            def _set_sl_tp():
+                                sl_tp_result = self.rest_client.set_trading_stop(
+                                    category='linear',
+                                    symbol=symbol,
+                                    stopLoss=str(sl),
+                                    takeProfit=str(tp1),
+                                    positionIdx=0
+                                )
+
+                                if sl_tp_result and 'retCode' in sl_tp_result and sl_tp_result['retCode'] == 0:
+                                    logger.info(f"✅ SL/TP1 configured!")
+                                    return True
+                                else:
+                                    error_msg = sl_tp_result.get('retMsg', 'Unknown') if sl_tp_result else 'No response'
+                                    raise Exception(f"API error: {error_msg}")
+
+                            result = retry_with_backoff(_set_sl_tp, max_retries=3, initial_delay=2.0)
+                            if not result:
+                                logger.error(f"❌ Failed to set SL/TP after retries!")
 
                 else:
                     raise Exception("API error")
