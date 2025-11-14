@@ -867,6 +867,42 @@ class MasterLiveTrader:
         logger.info(f"   SL: ${sl:,.2f}")
         logger.info(f"   TP1 (60%): ${tp1:,.2f} | TP2: ${tp2:,.2f} | TP3: ${tp3:,.2f}")
 
+        # 📊 Busca detalhes de execução real (preço médio, fees, slippage)
+        if is_live and order_id:
+            try:
+                time.sleep(0.5)  # Aguarda ordem ser processada
+                order_history = self.rest_client.get_order_history(
+                    symbol=symbol,
+                    order_id=order_id,
+                    limit=1
+                )
+
+                if order_history and 'result' in order_history:
+                    orders_list = order_history['result'].get('list', [])
+                    if orders_list and len(orders_list) > 0:
+                        order_info = orders_list[0]
+                        avg_price = float(order_info.get('avgPrice', 0))
+                        cum_exec_fee = float(order_info.get('cumExecFee', 0))
+                        cum_exec_qty = float(order_info.get('cumExecQty', 0))
+
+                        if avg_price > 0:
+                            # Calcula slippage
+                            expected_price = price
+                            slippage_abs = avg_price - expected_price
+                            slippage_pct = (slippage_abs / expected_price) * 100
+
+                            # Calcula fee rate
+                            exec_value = avg_price * cum_exec_qty
+                            fee_rate = (cum_exec_fee / exec_value * 100) if exec_value > 0 else 0
+
+                            logger.info(f"📊 EXECUTION DETAILS:")
+                            logger.info(f"   Expected: ${expected_price:,.2f} | Filled: ${avg_price:,.2f}")
+                            logger.info(f"   Slippage: ${slippage_abs:+,.2f} ({slippage_pct:+.3f}%)")
+                            logger.info(f"   Fees: ${cum_exec_fee:.4f} USDT ({fee_rate:.4f}%)")
+
+            except Exception as e:
+                logger.warning(f"⚠️ Could not fetch execution details: {e}")
+
         try:
             self.telegram.send_trade_open(self.position)
         except Exception as e:

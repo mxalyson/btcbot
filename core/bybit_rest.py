@@ -332,7 +332,33 @@ class BybitRESTClient:
         if symbol:
             params['symbol'] = symbol
         return self._request('GET', '/v5/position/list', params, signed=True)
-    
+
+    def get_order_history(self, symbol: str, order_id: Optional[str] = None,
+                          order_link_id: Optional[str] = None, limit: int = 50) -> Dict:
+        """
+        Get order history with execution details (fills, fees, avg price).
+
+        Args:
+            symbol: Trading symbol
+            order_id: Bybit order ID
+            order_link_id: User-defined order ID
+            limit: Number of records (max 50)
+
+        Returns:
+            API response with order execution details including avgPrice and cumExecFee
+        """
+        params = {
+            'category': 'linear',
+            'symbol': symbol,
+            'limit': limit
+        }
+        if order_id:
+            params['orderId'] = order_id
+        if order_link_id:
+            params['orderLinkId'] = order_link_id
+
+        return self._request('GET', '/v5/order/history', params, signed=True)
+
     def get_wallet_balance(self, account_type: str = 'UNIFIED') -> Dict:
         """Get wallet balance."""
         params = {'accountType': account_type}
