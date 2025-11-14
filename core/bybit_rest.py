@@ -18,7 +18,7 @@ class BybitRESTClient:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True, timeout: int = 30):
         """
         Initialize REST client.
-        
+
         Args:
             api_key: API key
             api_secret: API secret
@@ -28,21 +28,43 @@ class BybitRESTClient:
         self.api_key = api_key
         self.api_secret = api_secret
         self.timeout = timeout
-        
+
         if testnet:
             self.base_url = "https://api-testnet.bybit.com"
         else:
             self.base_url = "https://api.bybit.com"
-        
+
         self.recv_window = 5000
-        
+
         # Session for connection pooling
         self.session = requests.Session()
         self.session.headers.update({
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
-    
+
+        # ✅ Clock sync - calcula offset com servidor
+        self.time_offset = 0
+        self._sync_server_time()
+
+    def _sync_server_time(self):
+        """Sincroniza clock local com servidor Bybit"""
+        try:
+            local_time = int(time.time() * 1000)
+            response = self.session.get(
+                f"{self.base_url}/v5/market/time",
+                timeout=5
+            )
+            if response.status_code == 200:
+                data = response.json()
+                server_time = int(data.get('result', {}).get('timeSecond', 0)) * 1000
+                if server_time > 0:
+                    self.time_offset = server_time - local_time
+                    logger.info(f"✅ Clock synced - offset: {self.time_offset}ms")
+        except Exception as e:
+            logger.warning(f"⚠️ Clock sync failed: {e} - using local time")
+            self.time_offset = 0
+
     def _generate_signature(self, params: str, timestamp: int) -> str:
         """Generate HMAC SHA256 signature."""
         param_str = f"{timestamp}{self.api_key}{self.recv_window}{params}"
@@ -76,7 +98,7 @@ class BybitRESTClient:
         headers = {}
         
         if signed:
-            timestamp = int(time.time() * 1000)
+            timestamp = int(time.time() * 1000) + self.time_offset
             
             if method == 'GET':
                 params_str = urlencode(sorted(params.items()))
