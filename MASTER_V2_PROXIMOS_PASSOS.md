@@ -57,42 +57,85 @@ Criamos o **Master Scalper V2.0**, que combina:
 
 ## 🚀 PRÓXIMOS PASSOS (VOCÊ PRECISA EXECUTAR LOCALMENTE)
 
-### 1. Rodar Backtest do Master V2.0
+### ⭐ NOVO! Ferramentas de Validação Profissionais
+
+Criamos **3 scripts de validação universal** que testam automaticamente **30 combinações** de parâmetros:
+
+#### 1. Validar Master V2.0 (Teste Completo)
+
+```bash
+cd ml_training/validation
+
+# Valida com 30 combinações automáticas (6 confidence × 5 TP/SL)
+python validate_any_model.py \
+  --model ../outputs/scalping_model_BTCUSDT_15m_20251114_225401.pkl \
+  --days 90 \
+  --save-csv results_v2.csv
+```
+
+**Testa automaticamente**:
+- Confidence: 0%, 50%, 55%, 60%, 65%, 70%
+- TP/SL: (2.0,1.5), (2.5,1.0), (3.0,1.0), (2.0,1.0), (1.5,1.0)
+- **Total**: 30 combinações!
+- **Recomenda** melhor configuração automaticamente
+
+---
+
+#### 2. Comparar V2.0 vs Modelo Antigo (Lado a Lado)
+
+```bash
+# Compara os 2 modelos com mesmas configurações
+python compare_models.py \
+  --model1 ../outputs/scalping_model_BTCUSDT_15m_20251114_225401.pkl \
+  --model2 ../../ml_model_master_scalper_365d.pkl \
+  --days 90 \
+  --save-csv comparison.csv
+```
+
+**Output**:
+- Tabela side-by-side de performance
+- Determina vencedor automaticamente
+- Mostra diferença de ROI, WR, PF
+
+---
+
+#### 3. Analisar Predições (Detectar Viés)
+
+```bash
+# Analisa distribuição de predições e viés
+python analyze_predictions.py \
+  --model ../outputs/scalping_model_BTCUSDT_15m_20251114_225401.pkl \
+  --days 90
+```
+
+**Detecta**:
+- Viés para LONGs ou SHORTs
+- Confidence por threshold
+- Análise temporal
+- Correlação com volatilidade
+
+---
+
+### 📖 Documentação Completa
+
+Veja **`ml_training/validation/README_VALIDATION.md`** para:
+- Guia completo de uso
+- Exemplos de workflows
+- Interpretação de resultados
+- Troubleshooting
+
+---
+
+### 🔄 Método Antigo (Teste Rápido de 1 Configuração)
+
+Se preferir testar apenas 1 configuração específica:
 
 ```bash
 cd ml_training/validation
 python backtest_ml_model.py --model ../outputs/scalping_model_BTCUSDT_15m_20251114_225401.pkl --days 90 --confidence 0.50 --tp 2.0 --sl 1.5
 ```
 
-**Parâmetros**:
-- `--days 90`: Testa últimos 90 dias
-- `--confidence 0.50`: Confiança mínima 50%
-- `--tp 2.0`: Take Profit = 2.0 × ATR
-- `--sl 1.5`: Stop Loss = 1.5 × ATR
-
-**O Que Esperar**:
-- ✅ Win Rate: > 52% (idealmente 55-60%)
-- ✅ ROI: > 0% (idealmente 30-60%)
-- ✅ Profit Factor: > 1.0
-- ✅ Balanço de predições: 45-55% UP/DOWN
-
----
-
-### 2. Comparar com Modelo Antigo
-
-Para comparar, rode o mesmo backtest com o modelo antigo:
-
-```bash
-cd ml_training/validation
-python backtest_ml_model.py --model ../ml_model_master_scalper_365d.pkl --days 90 --confidence 0.50 --tp 2.0 --sl 1.5
-```
-
-**Compare**:
-- Win Rate
-- ROI Total
-- Profit Factor
-- Max Drawdown
-- Número de trades
+⚠️ **Limitação**: Testa apenas 1 combinação. Use `validate_any_model.py` para teste completo!
 
 ---
 
