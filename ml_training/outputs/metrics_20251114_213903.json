@@ -1,0 +1,56 @@
+{
+  "validation": {
+    "precision_LONG": 0.8386566292427698,
+    "precision_LONG_std": 0.019911981291466804,
+    "precision_macro": 0.8118983374853685,
+    "precision_macro_std": 0.015137050894978897,
+    "recall_NEUTRAL": 0.7432333744283457,
+    "recall_NEUTRAL_std": 0.05245683644715537,
+    "f1_macro": 0.811567912873586,
+    "f1_macro_std": 0.014360423255194116,
+    "recall_LONG": 0.8293210419188458,
+    "recall_LONG_std": 0.026900049147593558,
+    "accuracy": 0.8103935418768919,
+    "accuracy_std": 0.013281601117071967,
+    "precision_NEUTRAL": 0.7594293038576344,
+    "precision_NEUTRAL_std": 0.022063253461925135,
+    "recall_macro": 0.8121692350355028,
+    "recall_macro_std": 0.013217360645462058,
+    "recall_SHORT": 0.8639532887593168,
+    "recall_SHORT_std": 0.013198312646151594,
+    "precision_SHORT": 0.8376090793557017,
+    "precision_SHORT_std": 0.029047198524390888
+  },
+  "test": {
+    "accuracy": 0.7914798206278026,
+    "precision_macro": 0.7848552195050343,
+    "recall_macro": 0.7863885480244566,
+    "f1_macro": 0.78468175236301,
+    "precision_SHORT": 0.8297872340425532,
+    "recall_SHORT": 0.8666666666666667,
+    "precision_NEUTRAL": 0.7034068136272545,
+    "recall_NEUTRAL": 0.6312949640287769,
+    "precision_LONG": 0.8213716108452951,
+    "recall_LONG": 0.8612040133779264
+  },
+  "config": {
+    "symbol": "BTCUSDT",
+    "timeframe": "15m",
+    "lookback_days": 180,
+    "target_horizon": 5,
+    "target_type": "classification",
+    "target": {
+      "tp_pct": 0.003,
+      "sl_pct": 0.003,
+      "horizons": [
+        3,
+        5,
+        10
+      ],
+      "fees": 0.0006,
+      "slippage": 0.0001
+    },
+    "n_splits": 5,
+    "test_size_pct": 0.15
+  }
+}
