@@ -272,8 +272,9 @@ class MLBacktester:
         total_fees = position['entry_fee'] + exit_fee
         pnl_net = pnl_gross - total_fees
 
-        # Duration
-        duration_bars = current.name - position['entry_time']
+        # Duration (convert timedelta to number of 15min bars)
+        duration_timedelta = current.name - position['entry_time']
+        duration_bars = duration_timedelta.total_seconds() / 900  # 900s = 15min
 
         return {
             'entry_time': position['entry_time'],
