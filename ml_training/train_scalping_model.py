@@ -42,8 +42,10 @@ from core.utils import load_config, setup_logging
 from features.advanced_features import ScalpingFeatureEngineer, create_legacy_features
 from features.target_engineering import TargetEngineer
 
-# Setup
-logger = setup_logging("ModelTraining")
+# Setup logging
+import logging
+setup_logging("INFO", log_to_file=True)
+logger = logging.getLogger("TradingBot.ModelTraining")
 
 
 class ScalpingModelTrainer:
