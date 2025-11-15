@@ -43,10 +43,11 @@ class MLBacktester:
 
     def __init__(self, model_path: str, config: dict):
         self.config = config
-        self.model_path = Path(model_path)
+        # Resolve relative paths
+        self.model_path = Path(model_path).resolve()
 
         if not self.model_path.exists():
-            raise ValueError(f"Model not found: {model_path}")
+            raise ValueError(f"Model not found: {self.model_path}\n   Current dir: {Path.cwd()}")
 
         # Load model
         logger.info(f"📦 Loading model: {self.model_path.name}")
