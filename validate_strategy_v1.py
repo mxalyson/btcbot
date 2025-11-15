@@ -210,14 +210,10 @@ class StrategyValidator:
 
         if direction == 'long':
             sl = price - (atr * sl_atr_mult)
-            tp1 = price + (atr * 0.7)  # 60% close
-            tp2 = price + (atr * 1.3)  # Activate trailing
-            tp3 = price + (atr * tp_atr_mult)  # 40% close
+            tp1 = price + (atr * tp_atr_mult)
         else:
             sl = price + (atr * sl_atr_mult)
-            tp1 = price - (atr * 0.7)
-            tp2 = price - (atr * 1.3)
-            tp3 = price - (atr * tp_atr_mult)
+            tp1 = price - (atr * tp_atr_mult)
 
         sl_dist = abs((sl - price) / price)
         risk_amt = capital * self.risk_per_trade
@@ -230,92 +226,38 @@ class StrategyValidator:
             'entry_price': price,
             'direction': direction,
             'size': size,
-            'remaining_size': size,
             'stop_loss': sl,
-            'current_sl': sl,
             'tp1': tp1,
-            'tp2': tp2,
-            'tp3': tp3,
-            'tp1_hit': False,
-            'tp2_hit': False,
             'ml_confidence': current['ml_confidence'],
             'atr': atr,
-            'highest_price': price if direction == 'long' else None,
-            'lowest_price': price if direction == 'short' else None,
         }
 
     def _check_exit(self, position, current, idx):
-        """Check exit conditions with partial closes."""
+        """Check exit conditions - Simple TP1 and SL only."""
         high = current['high']
         low = current['low']
-        close = current['close']
         direction = position['direction']
-
-        # Update highest/lowest for trailing
-        if direction == 'long':
-            position['highest_price'] = max(position['highest_price'], high)
-        else:
-            position['lowest_price'] = min(position['lowest_price'], low)
 
         # Check exits
         if direction == 'long':
             # Stop loss
-            if low <= position['current_sl']:
+            if low <= position['stop_loss']:
                 return 'stop_loss'
 
-            # TP1 (60% close + move SL to BE)
-            if not position['tp1_hit'] and high >= position['tp1']:
-                position['tp1_hit'] = True
-                position['remaining_size'] *= 0.4  # Keep 40%
-                old_sl = position['current_sl']
-                position['current_sl'] = position['entry_price']  # Break-even
-                logger.info(f"   ✅ TP1 HIT @ ${position['tp1']:.2f} | Closed 60% | SL: ${old_sl:.2f} → ${position['current_sl']:.2f} (BE)")
-
-            # TP2 (activate trailing)
-            if position['tp1_hit'] and not position['tp2_hit'] and high >= position['tp2']:
-                position['tp2_hit'] = True
-                logger.info(f"   ✅ TP2 HIT @ ${position['tp2']:.2f} | Trailing Stop ACTIVATED (1.0x ATR)")
-
-            # Trailing stop (if TP2 hit)
-            if position['tp2_hit']:
-                atr_trail = position['atr'] * 1.0
-                trailing_sl = position['highest_price'] - atr_trail
-                old_sl = position['current_sl']
-                new_sl = max(position['current_sl'], trailing_sl)
-                if new_sl > old_sl:
-                    position['current_sl'] = new_sl
-                    logger.info(f"   📈 TRAILING: High ${position['highest_price']:.2f} | SL updated: ${old_sl:.2f} → ${new_sl:.2f}")
-
-            # TP3 (close remaining 40%)
-            if position['tp2_hit'] and high >= position['tp3']:
-                return 'take_profit_3'
+            # TP1 (close 100%)
+            if high >= position['tp1']:
+                logger.info(f"   ✅ TP1 HIT @ ${position['tp1']:.2f} | Closed 100%")
+                return 'take_profit'
 
         else:  # SHORT
-            if high >= position['current_sl']:
+            # Stop loss
+            if high >= position['stop_loss']:
                 return 'stop_loss'
 
-            if not position['tp1_hit'] and low <= position['tp1']:
-                position['tp1_hit'] = True
-                position['remaining_size'] *= 0.4
-                old_sl = position['current_sl']
-                position['current_sl'] = position['entry_price']
-                logger.info(f"   ✅ TP1 HIT @ ${position['tp1']:.2f} | Closed 60% | SL: ${old_sl:.2f} → ${position['current_sl']:.2f} (BE)")
-
-            if position['tp1_hit'] and not position['tp2_hit'] and low <= position['tp2']:
-                position['tp2_hit'] = True
-                logger.info(f"   ✅ TP2 HIT @ ${position['tp2']:.2f} | Trailing Stop ACTIVATED (1.0x ATR)")
-
-            if position['tp2_hit']:
-                atr_trail = position['atr'] * 1.0
-                trailing_sl = position['lowest_price'] + atr_trail
-                old_sl = position['current_sl']
-                new_sl = min(position['current_sl'], trailing_sl)
-                if new_sl < old_sl:
-                    position['current_sl'] = new_sl
-                    logger.info(f"   📉 TRAILING: Low ${position['lowest_price']:.2f} | SL updated: ${old_sl:.2f} → ${new_sl:.2f}")
-
-            if position['tp2_hit'] and low <= position['tp3']:
-                return 'take_profit_3'
+            # TP1 (close 100%)
+            if low <= position['tp1']:
+                logger.info(f"   ✅ TP1 HIT @ ${position['tp1']:.2f} | Closed 100%")
+                return 'take_profit'
 
         # Time exit (48h = 192 bars of 15min)
         if idx - position['entry_idx'] > 192:
@@ -324,38 +266,24 @@ class StrategyValidator:
         return None
 
     def _close_trade(self, position, current, reason):
-        """Close trade and calculate PnL."""
+        """Close trade and calculate PnL - Simple 100% close."""
         if reason == 'stop_loss':
-            exit_price = position['current_sl']
-        elif reason == 'take_profit_3':
-            exit_price = position['tp3']
-        else:
+            exit_price = position['stop_loss']
+        elif reason == 'take_profit':
+            exit_price = position['tp1']
+        else:  # time_exit
             exit_price = current['close']
 
         entry = position['entry_price']
         direction = position['direction']
 
-        # PnL calculation considers partial closes
-        if position['tp1_hit']:
-            # TP1 already closed 60% at tp1 price
-            pnl_tp1 = 0.6 * position['size'] * (
-                ((position['tp1'] - entry) / entry) if direction == 'long'
-                else ((entry - position['tp1']) / entry)
-            )
-            # Remaining 40% closes at exit_price
-            pnl_remaining = 0.4 * position['size'] * (
-                ((exit_price - entry) / entry) if direction == 'long'
-                else ((entry - exit_price) / entry)
-            )
-            pnl_pct = ((pnl_tp1 + pnl_remaining) / position['size']) * 100
-            pnl_amount = pnl_tp1 + pnl_remaining
+        # Simple PnL calculation (100% position)
+        if direction == 'long':
+            pnl_pct = ((exit_price - entry) / entry) * 100
         else:
-            # No partial close, full position
-            if direction == 'long':
-                pnl_pct = ((exit_price - entry) / entry) * 100
-            else:
-                pnl_pct = ((entry - exit_price) / entry) * 100
-            pnl_amount = position['size'] * (pnl_pct / 100)
+            pnl_pct = ((entry - exit_price) / entry) * 100
+
+        pnl_amount = position['size'] * (pnl_pct / 100)
 
         return {
             'entry_time': position['entry_time'],
@@ -367,8 +295,6 @@ class StrategyValidator:
             'pnl_pct': pnl_pct,
             'pnl_amount': pnl_amount,
             'reason': reason,
-            'tp1_hit': position['tp1_hit'],
-            'tp2_hit': position['tp2_hit'],
             'ml_confidence': position['ml_confidence']
         }
 
@@ -415,10 +341,6 @@ class StrategyValidator:
         long_wr = (len(longs[longs['pnl_amount'] > 0]) / len(longs) * 100) if len(longs) > 0 else 0
         short_wr = (len(shorts[shorts['pnl_amount'] > 0]) / len(shorts) * 100) if len(shorts) > 0 else 0
 
-        # Partial close stats
-        tp1_hit_count = df_trades['tp1_hit'].sum()
-        tp2_hit_count = df_trades['tp2_hit'].sum()
-
         avg_confidence = df_trades['ml_confidence'].mean()
 
         return {
@@ -442,8 +364,6 @@ class StrategyValidator:
             'short_trades': len(shorts),
             'long_wr': long_wr,
             'short_wr': short_wr,
-            'tp1_hit_count': tp1_hit_count,
-            'tp2_hit_count': tp2_hit_count,
         }
 
 
@@ -674,8 +594,6 @@ def analyze_best_config(results):
         logger.info(f"   Avg Confidence: {r['avg_ml_confidence']*100:.1f}%")
         logger.info(f"   Long trades: {r['long_trades']} (WR: {r['long_wr']:.1f}%)")
         logger.info(f"   Short trades: {r['short_trades']} (WR: {r['short_wr']:.1f}%)")
-        logger.info(f"   TP1 hits: {r['tp1_hit_count']:.0f} ({r['tp1_hit_count']/r['total_trades']*100:.1f}%)")
-        logger.info(f"   TP2 hits: {r['tp2_hit_count']:.0f} ({r['tp2_hit_count']/r['total_trades']*100:.1f}%)")
 
     logger.info("")
     logger.info("=" * 80)
