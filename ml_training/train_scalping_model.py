@@ -20,6 +20,7 @@ import numpy as np
 import pickle
 import json
 import time
+import os
 from datetime import datetime, timedelta
 from typing import Dict, Tuple, List
 import warnings
@@ -34,6 +35,7 @@ from sklearn.metrics import (
 )
 
 # Imports locais
+from core.bybit_rest import BybitRESTClient
 from core.data import DataManager
 from core.features import FeatureStore
 from core.utils import load_config, setup_logging
@@ -81,7 +83,13 @@ class ScalpingModelTrainer:
         self.test_size_pct = config.get('test_size_pct', 0.15)
 
         # Initialize components
-        self.data_manager = DataManager(load_config())
+        # Initialize Bybit REST client for data download
+        self.rest_client = BybitRESTClient(
+            api_key=os.getenv('BYBIT_API_KEY', ''),
+            api_secret=os.getenv('BYBIT_API_SECRET', ''),
+            testnet=False  # Use production for historical data
+        )
+        self.data_manager = DataManager(self.rest_client)
         self.feature_store = FeatureStore(load_config())
         self.scalping_features = ScalpingFeatureEngineer()
         self.target_engineer = TargetEngineer(self.target_config)
