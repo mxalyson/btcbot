@@ -35,6 +35,10 @@ from core.bybit_rest import BybitRESTClient
 from core.data import DataManager
 from core.features import FeatureStore
 
+# Import advanced features (same as training)
+sys.path.append(str(Path(__file__).parent.parent))
+from features.advanced_features import ScalpingFeatureEngineer, create_legacy_features
+
 logger = None
 
 
@@ -460,11 +464,22 @@ def main():
     logger.info(f"   Period: {df.index[0]} to {df.index[-1]}")
     logger.info("")
 
-    # Build features
+    # Build features (same as training!)
     logger.info("🔨 Building features...")
+
+    # 1. Base features
     fs = FeatureStore(config)
     df_features = fs.build_features(df, normalize=False)
-    logger.info(f"✅ Features ready: {len(df_features.columns)} columns")
+    logger.info(f"✅ Base features: {len(df_features.columns)} columns")
+
+    # 2. Legacy features
+    df_features = create_legacy_features(df_features)
+    logger.info(f"✅ Legacy features added")
+
+    # 3. Advanced scalping features
+    scalping_engineer = ScalpingFeatureEngineer()
+    df_features = scalping_engineer.build_all_features(df_features)
+    logger.info(f"✅ Scalping features: {len(df_features.columns)} columns")
     logger.info("")
 
     # Run backtest
