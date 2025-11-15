@@ -340,9 +340,13 @@ class MLBacktester:
         # Exit reasons
         exit_reasons = df_trades['reason'].value_counts().to_dict()
 
-        # Duration
+        # Duration - ensure it's numeric (not timedelta)
         avg_duration = df_trades['duration_bars'].mean()
+        if hasattr(avg_duration, 'total_seconds'):
+            avg_duration = avg_duration.total_seconds() / 900  # Convert to bars
         max_duration = df_trades['duration_bars'].max()
+        if hasattr(max_duration, 'total_seconds'):
+            max_duration = max_duration.total_seconds() / 900  # Convert to bars
 
         return {
             'min_confidence': min_confidence,
