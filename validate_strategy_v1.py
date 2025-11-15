@@ -267,19 +267,24 @@ class StrategyValidator:
             if not position['tp1_hit'] and high >= position['tp1']:
                 position['tp1_hit'] = True
                 position['remaining_size'] *= 0.4  # Keep 40%
+                old_sl = position['current_sl']
                 position['current_sl'] = position['entry_price']  # Break-even
-                logger.debug(f"TP1 hit: Closed 60%, SL moved to BE")
+                logger.info(f"   ✅ TP1 HIT @ ${position['tp1']:.2f} | Closed 60% | SL: ${old_sl:.2f} → ${position['current_sl']:.2f} (BE)")
 
             # TP2 (activate trailing)
             if position['tp1_hit'] and not position['tp2_hit'] and high >= position['tp2']:
                 position['tp2_hit'] = True
-                logger.debug(f"TP2 hit: Trailing activated")
+                logger.info(f"   ✅ TP2 HIT @ ${position['tp2']:.2f} | Trailing Stop ACTIVATED (1.0x ATR)")
 
             # Trailing stop (if TP2 hit)
             if position['tp2_hit']:
                 atr_trail = position['atr'] * 1.0
                 trailing_sl = position['highest_price'] - atr_trail
-                position['current_sl'] = max(position['current_sl'], trailing_sl)
+                old_sl = position['current_sl']
+                new_sl = max(position['current_sl'], trailing_sl)
+                if new_sl > old_sl:
+                    position['current_sl'] = new_sl
+                    logger.info(f"   📈 TRAILING: High ${position['highest_price']:.2f} | SL updated: ${old_sl:.2f} → ${new_sl:.2f}")
 
             # TP3 (close remaining 40%)
             if position['tp2_hit'] and high >= position['tp3']:
@@ -292,15 +297,22 @@ class StrategyValidator:
             if not position['tp1_hit'] and low <= position['tp1']:
                 position['tp1_hit'] = True
                 position['remaining_size'] *= 0.4
+                old_sl = position['current_sl']
                 position['current_sl'] = position['entry_price']
+                logger.info(f"   ✅ TP1 HIT @ ${position['tp1']:.2f} | Closed 60% | SL: ${old_sl:.2f} → ${position['current_sl']:.2f} (BE)")
 
             if position['tp1_hit'] and not position['tp2_hit'] and low <= position['tp2']:
                 position['tp2_hit'] = True
+                logger.info(f"   ✅ TP2 HIT @ ${position['tp2']:.2f} | Trailing Stop ACTIVATED (1.0x ATR)")
 
             if position['tp2_hit']:
                 atr_trail = position['atr'] * 1.0
                 trailing_sl = position['lowest_price'] + atr_trail
-                position['current_sl'] = min(position['current_sl'], trailing_sl)
+                old_sl = position['current_sl']
+                new_sl = min(position['current_sl'], trailing_sl)
+                if new_sl < old_sl:
+                    position['current_sl'] = new_sl
+                    logger.info(f"   📉 TRAILING: Low ${position['lowest_price']:.2f} | SL updated: ${old_sl:.2f} → ${new_sl:.2f}")
 
             if position['tp2_hit'] and low <= position['tp3']:
                 return 'take_profit_3'
