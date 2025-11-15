@@ -45,7 +45,7 @@ logger = None
 class MLBacktester:
     """Backtest realista para modelo ML de scalping."""
 
-    def __init__(self, model_path: str, config: dict):
+    def __init__(self, model_path: str, config: dict, atr_mult_tp: float = 1.0, atr_mult_sl: float = 1.5):
         self.config = config
         # Resolve relative paths
         self.model_path = Path(model_path).resolve()
@@ -70,6 +70,11 @@ class MLBacktester:
         self.risk_per_trade = config.get('risk_per_trade', 0.0075)  # 0.75%
         self.fees_pct = 0.0006  # 0.06%
         self.slippage_pct = 0.0001  # 0.01%
+        self.atr_mult_tp = atr_mult_tp
+        self.atr_mult_sl = atr_mult_sl
+
+        logger.info(f"   TP: {self.atr_mult_tp} ATR | SL: {self.atr_mult_sl} ATR")
+        logger.info(f"   Theoretical R:R: {self.atr_mult_tp / self.atr_mult_sl:.2f}")
 
     def backtest(self, df: pd.DataFrame, min_confidence: float = 0.0) -> Dict:
         """
@@ -189,12 +194,12 @@ class MLBacktester:
         # Aplica slippage na entrada
         if direction == 'long':
             entry_price = price * (1 + self.slippage_pct)
-            sl = entry_price - (atr * 1.5)  # 1.5 ATR SL
-            tp = entry_price + (atr * 1.0)  # 1.0 ATR TP (mais conservador)
+            sl = entry_price - (atr * self.atr_mult_sl)
+            tp = entry_price + (atr * self.atr_mult_tp)
         else:
             entry_price = price * (1 - self.slippage_pct)
-            sl = entry_price + (atr * 1.5)
-            tp = entry_price - (atr * 1.0)
+            sl = entry_price + (atr * self.atr_mult_sl)
+            tp = entry_price - (atr * self.atr_mult_tp)
 
         # Calcula tamanho baseado em risco
         sl_dist = abs((sl - entry_price) / entry_price)
@@ -431,6 +436,8 @@ def main():
     parser.add_argument('--symbol', type=str, default='BTCUSDT', help='Symbol')
     parser.add_argument('--days', type=int, default=90, help='Dias de histórico')
     parser.add_argument('--confidence', type=float, default=0.0, help='Confiança mínima (0.0-1.0)')
+    parser.add_argument('--tp', type=float, default=1.0, help='Take Profit em ATR (default: 1.0)')
+    parser.add_argument('--sl', type=float, default=1.5, help='Stop Loss em ATR (default: 1.5)')
 
     args = parser.parse_args()
 
@@ -488,7 +495,7 @@ def main():
     logger.info("")
 
     # Run backtest
-    backtester = MLBacktester(args.model, config)
+    backtester = MLBacktester(args.model, config, atr_mult_tp=args.tp, atr_mult_sl=args.sl)
     metrics = backtester.backtest(df_features, min_confidence=args.confidence)
 
     if 'error' in metrics:
