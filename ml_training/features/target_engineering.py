@@ -312,6 +312,13 @@ class TargetEngineer:
 
         X = df_clean[feature_cols]
 
+        # Remove colunas não-numéricas (LightGBM não aceita 'object')
+        numeric_cols = X.select_dtypes(include=['int', 'int64', 'float', 'float64', 'bool']).columns
+        non_numeric = set(X.columns) - set(numeric_cols)
+        if len(non_numeric) > 0:
+            print(f"   ⚠️  Removing {len(non_numeric)} non-numeric columns: {list(non_numeric)}")
+        X = X[numeric_cols]
+
         print(f"\n✅ Training data prepared:")
         print(f"   Target: {target_col} ({target_type})")
         print(f"   Samples: {len(X):,}")
