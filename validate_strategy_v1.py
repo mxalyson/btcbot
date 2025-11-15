@@ -27,17 +27,45 @@ import argparse
 import pickle
 from datetime import datetime
 
-from core.data_manager import DataManager
-from ml_training.features.feature_engineering import FeatureEngineer
-from ml_training.features.advanced_features import ScalpingFeatureEngineer, create_legacy_features
+from core.utils import load_config, setup_logging
+from core.bybit_rest import BybitRESTClient
+from core.data import DataManager
+from core.features import FeatureStore
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+logger = None
+
+
+def create_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add MASTER TRADER advanced features - SAME as training!"""
+
+    df_features = df.copy()
+
+    # Multi-period momentum
+    for period in [3, 5, 8, 13, 21]:
+        df_features[f'momentum_{period}'] = df_features['close'].pct_change(period) * 100
+        df_features[f'volume_ratio_{period}'] = df_features['volume'] / df_features['volume'].rolling(period).mean()
+
+    # Trend strength
+    if 'ema50' in df_features.columns and 'ema200' in df_features.columns:
+        df_features['trend_strength'] = (df_features['ema50'] - df_features['ema200']) / df_features['ema200'] * 100
+
+    # Volatility regimes
+    if 'atr' in df_features.columns:
+        df_features['volatility_regime'] = (df_features['atr'] / df_features['atr'].rolling(50).mean())
+
+    # Price position in recent range
+    df_features['price_position'] = (
+        (df_features['close'] - df_features['low'].rolling(20).min()) /
+        (df_features['high'].rolling(20).max() - df_features['low'].rolling(20).min())
+    ).fillna(0.5)
+
+    # Volume momentum
+    df_features['volume_momentum'] = df_features['volume'].pct_change(5)
+
+    # Acceleration
+    df_features['price_acceleration'] = df_features['close'].diff(2) - df_features['close'].diff(1)
+
+    return df_features
 
 
 class StrategyValidator:
@@ -408,6 +436,8 @@ class StrategyValidator:
 
 
 def main():
+    global logger
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--symbol', type=str, default='BTCUSDT')
     parser.add_argument('--days', type=int, default=180)
@@ -415,10 +445,11 @@ def main():
 
     args = parser.parse_args()
 
-    config = {
-        'initial_capital': 10000,
-        'risk_per_trade_pct': 0.75
-    }
+    config = load_config('standard')
+    config['initial_capital'] = 10000
+    config['risk_per_trade_pct'] = 0.75
+
+    logger = setup_logging('INFO', log_to_file=False)
 
     logger.info("=" * 80)
     logger.info("🔬 VALIDAÇÃO COMPLETA DA ESTRATÉGIA - V1 MODEL")
@@ -430,12 +461,14 @@ def main():
 
     # Download data
     logger.info("📥 Downloading data...")
-    dm = DataManager()
-    df = dm.fetch_historical_data(
-        symbol=args.symbol,
-        timeframe='15m',
-        days=args.days
+    rest_client = BybitRESTClient(
+        api_key=config['bybit_api_key'],
+        api_secret=config['bybit_api_secret'],
+        testnet=config['bybit_testnet']
     )
+
+    dm = DataManager(rest_client)
+    df = dm.get_data(args.symbol, '15m', args.days, use_cache=False)
 
     if df.empty:
         logger.error("❌ No data")
@@ -446,16 +479,12 @@ def main():
 
     # Build features
     logger.info("🔨 Building features...")
-    feature_engineer = FeatureEngineer()
-    df_features = feature_engineer.build_features(df)
+    fs = FeatureStore(config)
+    df_features = fs.build_features(df, normalize=False)
     logger.info(f"   ✅ Base features: {len(df_features.columns)} columns")
 
-    df_features = create_legacy_features(df_features)
-    logger.info(f"   ✅ Legacy features added")
-
-    scalping_engineer = ScalpingFeatureEngineer()
-    df_features = scalping_engineer.build_all_features(df_features)
-    logger.info(f"   ✅ Advanced features: {len(df_features.columns)} columns")
+    df_features = create_advanced_features(df_features)
+    logger.info(f"   ✅ Advanced features added")
 
     logger.info(f"✅ Features ready: {len(df_features.columns)} columns")
     logger.info("")
