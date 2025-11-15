@@ -1,0 +1,630 @@
+#!/usr/bin/env python3
+"""
+VALIDAÇÃO COMPLETA DA ESTRATÉGIA - V1 MODEL
+Testa o modelo V1 (1.2MB) com diferentes parâmetros para validar robustez
+
+Baseado no validate_strategy.py original, mas:
+- ✅ Compatível com modelos binary (2 classes) e multiclass (3 classes)
+- ✅ Testa múltiplos TP/SL além de confidence
+- ✅ Features completas (base + legacy + advanced)
+- ✅ Gestão parcial de posição (TP1, TP2, TP3)
+- ✅ Trailing stop após TP2
+- ✅ Validações de segurança
+"""
+
+import sys
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning, message='.*Boolean Series key.*')
+sys.path.append(str(Path(__file__).parent))
+
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple
+import logging
+import argparse
+import pickle
+from datetime import datetime
+
+from core.data_manager import DataManager
+from ml_training.features.feature_engineering import FeatureEngineer
+from ml_training.features.advanced_features import ScalpingFeatureEngineer, create_legacy_features
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+class StrategyValidator:
+    """Valida a estratégia com diferentes configurações."""
+
+    def __init__(self, config: dict, model_path: str):
+        self.config = config
+        self.model_path = Path(model_path)
+
+        if not self.model_path.exists():
+            raise ValueError(f"Model not found: {model_path}")
+
+        # Load model
+        with open(self.model_path, 'rb') as f:
+            self.model_data = pickle.load(f)
+
+        self.model = self.model_data['model']
+        self.feature_names = self.model_data['feature_names']
+        self.metadata = self.model_data.get('metadata', {})
+
+        # Detect model type
+        self._detect_model_type()
+
+        self.initial_capital = config.get('initial_capital', 10000)
+        self.risk_per_trade = config.get('risk_per_trade_pct', 0.75) / 100
+
+        logger.info(f"✅ Model loaded: {self.model_path.name}")
+        logger.info(f"   Type: {self.model_type}")
+        logger.info(f"   Features: {len(self.feature_names)}")
+        logger.info(f"   Target: {self.metadata.get('target_type', 'unknown')}")
+
+    def _detect_model_type(self):
+        """Detect if model is binary or multiclass."""
+        try:
+            if hasattr(self.model, 'n_classes_'):
+                n_classes = self.model.n_classes_
+            elif hasattr(self.model, '_n_classes'):
+                n_classes = self.model._n_classes
+            else:
+                dummy = np.zeros((1, len(self.feature_names)))
+                proba = self.model.predict_proba(dummy)
+                n_classes = proba.shape[1]
+
+            self.n_classes = n_classes
+            self.model_type = 'BINARY' if n_classes == 2 else 'MULTICLASS'
+        except:
+            self.n_classes = 2
+            self.model_type = 'BINARY'
+
+    def backtest_with_config(
+        self,
+        df: pd.DataFrame,
+        min_confidence: float,
+        tp_atr_mult: float = 2.0,
+        sl_atr_mult: float = 1.5
+    ) -> Dict:
+        """Run backtest com configuração específica."""
+
+        # Get ML predictions
+        missing_features = [f for f in self.feature_names if f not in df.columns]
+        if missing_features:
+            for feat in missing_features:
+                df[feat] = 0
+
+        X = df[self.feature_names].fillna(0)
+        predictions = self.model.predict(X)
+        proba = self.model.predict_proba(X)
+
+        # Process predictions based on model type
+        if self.model_type == 'BINARY':
+            df['ml_pred'] = predictions
+            df['ml_prob_short'] = proba[:, 0]
+            df['ml_prob_long'] = proba[:, 1]
+            df['ml_confidence'] = np.where(
+                predictions == 1,
+                proba[:, 1],
+                proba[:, 0]
+            )
+            # Signals
+            df['signal'] = 0
+            df.loc[(predictions == 1) & (df['ml_confidence'] >= min_confidence), 'signal'] = 1   # LONG
+            df.loc[(predictions == 0) & (df['ml_confidence'] >= min_confidence), 'signal'] = -1  # SHORT
+        else:
+            # Multiclass
+            df['ml_pred'] = predictions
+            df['ml_prob_short'] = proba[:, 1]
+            df['ml_prob_neutral'] = proba[:, 0]
+            df['ml_prob_long'] = proba[:, 2]
+            df['ml_confidence'] = proba.max(axis=1)
+            # Signals
+            df['signal'] = 0
+            df.loc[(predictions == 2) & (df['ml_confidence'] >= min_confidence), 'signal'] = 1   # LONG
+            df.loc[(predictions == 1) & (df['ml_confidence'] >= min_confidence), 'signal'] = -1  # SHORT
+
+        # Simulate trades
+        trades = self._simulate(df, tp_atr_mult, sl_atr_mult)
+
+        # Calculate stats
+        stats = self._calculate_stats(trades, df, min_confidence, tp_atr_mult, sl_atr_mult)
+
+        return stats
+
+    def _simulate(self, df: pd.DataFrame, tp_atr_mult: float, sl_atr_mult: float) -> List[Dict]:
+        """Simulate trades with partial closes (TP1, TP2, TP3)."""
+        trades = []
+        position = None
+        capital = self.initial_capital
+        cooldown = 0
+
+        for i in range(len(df)):
+            current = df.iloc[i]
+
+            if cooldown > 0:
+                cooldown -= 1
+
+            # Check exit
+            if position:
+                exit_reason = self._check_exit(position, current, i)
+                if exit_reason:
+                    trade = self._close_trade(position, current, exit_reason)
+                    trades.append(trade)
+                    capital += trade['pnl_amount']
+                    position = None
+                    cooldown = 4
+
+            # Check entry
+            if not position and current['signal'] != 0 and cooldown == 0 and i < len(df) - 20:
+                position = self._open_trade(current, capital, i, tp_atr_mult, sl_atr_mult)
+
+        # Close final position
+        if position:
+            trade = self._close_trade(position, df.iloc[-1], 'end_of_data')
+            trades.append(trade)
+
+        return trades
+
+    def _open_trade(self, current, capital, idx, tp_atr_mult, sl_atr_mult):
+        """Open new trade."""
+        direction = 'long' if current['signal'] == 1 else 'short'
+        price = current['close']
+        atr = current.get('atr', price * 0.01)
+
+        if direction == 'long':
+            sl = price - (atr * sl_atr_mult)
+            tp1 = price + (atr * 0.7)  # 60% close
+            tp2 = price + (atr * 1.3)  # Activate trailing
+            tp3 = price + (atr * tp_atr_mult)  # 40% close
+        else:
+            sl = price + (atr * sl_atr_mult)
+            tp1 = price - (atr * 0.7)
+            tp2 = price - (atr * 1.3)
+            tp3 = price - (atr * tp_atr_mult)
+
+        sl_dist = abs((sl - price) / price)
+        risk_amt = capital * self.risk_per_trade
+        size = risk_amt / sl_dist if sl_dist > 0 else capital * 0.1
+        size = min(size, capital * 0.95)
+
+        return {
+            'entry_idx': idx,
+            'entry_time': current.name,
+            'entry_price': price,
+            'direction': direction,
+            'size': size,
+            'remaining_size': size,
+            'stop_loss': sl,
+            'current_sl': sl,
+            'tp1': tp1,
+            'tp2': tp2,
+            'tp3': tp3,
+            'tp1_hit': False,
+            'tp2_hit': False,
+            'ml_confidence': current['ml_confidence'],
+            'atr': atr,
+            'highest_price': price if direction == 'long' else None,
+            'lowest_price': price if direction == 'short' else None,
+        }
+
+    def _check_exit(self, position, current, idx):
+        """Check exit conditions with partial closes."""
+        high = current['high']
+        low = current['low']
+        close = current['close']
+        direction = position['direction']
+
+        # Update highest/lowest for trailing
+        if direction == 'long':
+            position['highest_price'] = max(position['highest_price'], high)
+        else:
+            position['lowest_price'] = min(position['lowest_price'], low)
+
+        # Check exits
+        if direction == 'long':
+            # Stop loss
+            if low <= position['current_sl']:
+                return 'stop_loss'
+
+            # TP1 (60% close + move SL to BE)
+            if not position['tp1_hit'] and high >= position['tp1']:
+                position['tp1_hit'] = True
+                position['remaining_size'] *= 0.4  # Keep 40%
+                position['current_sl'] = position['entry_price']  # Break-even
+                logger.debug(f"TP1 hit: Closed 60%, SL moved to BE")
+
+            # TP2 (activate trailing)
+            if position['tp1_hit'] and not position['tp2_hit'] and high >= position['tp2']:
+                position['tp2_hit'] = True
+                logger.debug(f"TP2 hit: Trailing activated")
+
+            # Trailing stop (if TP2 hit)
+            if position['tp2_hit']:
+                atr_trail = position['atr'] * 1.0
+                trailing_sl = position['highest_price'] - atr_trail
+                position['current_sl'] = max(position['current_sl'], trailing_sl)
+
+            # TP3 (close remaining 40%)
+            if position['tp2_hit'] and high >= position['tp3']:
+                return 'take_profit_3'
+
+        else:  # SHORT
+            if high >= position['current_sl']:
+                return 'stop_loss'
+
+            if not position['tp1_hit'] and low <= position['tp1']:
+                position['tp1_hit'] = True
+                position['remaining_size'] *= 0.4
+                position['current_sl'] = position['entry_price']
+
+            if position['tp1_hit'] and not position['tp2_hit'] and low <= position['tp2']:
+                position['tp2_hit'] = True
+
+            if position['tp2_hit']:
+                atr_trail = position['atr'] * 1.0
+                trailing_sl = position['lowest_price'] + atr_trail
+                position['current_sl'] = min(position['current_sl'], trailing_sl)
+
+            if position['tp2_hit'] and low <= position['tp3']:
+                return 'take_profit_3'
+
+        # Time exit (48h = 192 bars of 15min)
+        if idx - position['entry_idx'] > 192:
+            return 'time_exit'
+
+        return None
+
+    def _close_trade(self, position, current, reason):
+        """Close trade and calculate PnL."""
+        if reason == 'stop_loss':
+            exit_price = position['current_sl']
+        elif reason == 'take_profit_3':
+            exit_price = position['tp3']
+        else:
+            exit_price = current['close']
+
+        entry = position['entry_price']
+        direction = position['direction']
+
+        # PnL calculation considers partial closes
+        if position['tp1_hit']:
+            # TP1 already closed 60% at tp1 price
+            pnl_tp1 = 0.6 * position['size'] * (
+                ((position['tp1'] - entry) / entry) if direction == 'long'
+                else ((entry - position['tp1']) / entry)
+            )
+            # Remaining 40% closes at exit_price
+            pnl_remaining = 0.4 * position['size'] * (
+                ((exit_price - entry) / entry) if direction == 'long'
+                else ((entry - exit_price) / entry)
+            )
+            pnl_pct = ((pnl_tp1 + pnl_remaining) / position['size']) * 100
+            pnl_amount = pnl_tp1 + pnl_remaining
+        else:
+            # No partial close, full position
+            if direction == 'long':
+                pnl_pct = ((exit_price - entry) / entry) * 100
+            else:
+                pnl_pct = ((entry - exit_price) / entry) * 100
+            pnl_amount = position['size'] * (pnl_pct / 100)
+
+        return {
+            'entry_time': position['entry_time'],
+            'exit_time': current.name,
+            'direction': direction,
+            'entry_price': entry,
+            'exit_price': exit_price,
+            'size': position['size'],
+            'pnl_pct': pnl_pct,
+            'pnl_amount': pnl_amount,
+            'reason': reason,
+            'tp1_hit': position['tp1_hit'],
+            'tp2_hit': position['tp2_hit'],
+            'ml_confidence': position['ml_confidence']
+        }
+
+    def _calculate_stats(self, trades, df, min_confidence, tp_atr_mult, sl_atr_mult):
+        """Calculate statistics."""
+        if not trades:
+            return {
+                'error': 'No trades',
+                'total_trades': 0,
+                'min_confidence': min_confidence,
+                'tp_atr_mult': tp_atr_mult,
+                'sl_atr_mult': sl_atr_mult
+            }
+
+        df_trades = pd.DataFrame(trades)
+
+        total = len(df_trades)
+        winning = df_trades[df_trades['pnl_amount'] > 0]
+        losing = df_trades[df_trades['pnl_amount'] <= 0]
+
+        win_rate = len(winning) / total if total > 0 else 0
+
+        total_pnl = df_trades['pnl_amount'].sum()
+        roi = (total_pnl / self.initial_capital) * 100
+
+        avg_win = winning['pnl_amount'].mean() if len(winning) > 0 else 0
+        avg_loss = abs(losing['pnl_amount'].mean()) if len(losing) > 0 else 0
+
+        pf = (winning['pnl_amount'].sum() / abs(losing['pnl_amount'].sum())
+              if len(losing) > 0 and losing['pnl_amount'].sum() != 0 else 0)
+
+        returns = df_trades['pnl_pct'].values
+        sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(252)
+                 if len(returns) > 1 and np.std(returns) > 0 else 0)
+
+        equity = self.initial_capital + df_trades['pnl_amount'].cumsum()
+        peak = equity.expanding().max()
+        dd = ((equity - peak) / peak * 100).min()
+
+        # Direction stats
+        longs = df_trades[df_trades['direction'] == 'long']
+        shorts = df_trades[df_trades['direction'] == 'short']
+
+        long_wr = (len(longs[longs['pnl_amount'] > 0]) / len(longs) * 100) if len(longs) > 0 else 0
+        short_wr = (len(shorts[shorts['pnl_amount'] > 0]) / len(shorts) * 100) if len(shorts) > 0 else 0
+
+        # Partial close stats
+        tp1_hit_count = df_trades['tp1_hit'].sum()
+        tp2_hit_count = df_trades['tp2_hit'].sum()
+
+        avg_confidence = df_trades['ml_confidence'].mean()
+
+        return {
+            'min_confidence': min_confidence,
+            'tp_atr_mult': tp_atr_mult,
+            'sl_atr_mult': sl_atr_mult,
+            'total_trades': total,
+            'winning_trades': len(winning),
+            'losing_trades': len(losing),
+            'win_rate': win_rate,
+            'total_pnl': total_pnl,
+            'roi': roi,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
+            'profit_factor': pf,
+            'max_drawdown': dd,
+            'sharpe_ratio': sharpe,
+            'final_capital': self.initial_capital + total_pnl,
+            'avg_ml_confidence': avg_confidence,
+            'long_trades': len(longs),
+            'short_trades': len(shorts),
+            'long_wr': long_wr,
+            'short_wr': short_wr,
+            'tp1_hit_count': tp1_hit_count,
+            'tp2_hit_count': tp2_hit_count,
+        }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--symbol', type=str, default='BTCUSDT')
+    parser.add_argument('--days', type=int, default=180)
+    parser.add_argument('--model', type=str, default='scalping_model_BTCUSDT_15m_20251114_213903.pkl')
+
+    args = parser.parse_args()
+
+    config = {
+        'initial_capital': 10000,
+        'risk_per_trade_pct': 0.75
+    }
+
+    logger.info("=" * 80)
+    logger.info("🔬 VALIDAÇÃO COMPLETA DA ESTRATÉGIA - V1 MODEL")
+    logger.info("=" * 80)
+    logger.info(f"Symbol: {args.symbol}")
+    logger.info(f"Period: {args.days} days")
+    logger.info(f"Model: {args.model}")
+    logger.info("")
+
+    # Download data
+    logger.info("📥 Downloading data...")
+    dm = DataManager()
+    df = dm.fetch_historical_data(
+        symbol=args.symbol,
+        timeframe='15m',
+        days=args.days
+    )
+
+    if df.empty:
+        logger.error("❌ No data")
+        return
+
+    logger.info(f"✅ Downloaded {len(df):,} candles")
+    logger.info("")
+
+    # Build features
+    logger.info("🔨 Building features...")
+    feature_engineer = FeatureEngineer()
+    df_features = feature_engineer.build_features(df)
+    logger.info(f"   ✅ Base features: {len(df_features.columns)} columns")
+
+    df_features = create_legacy_features(df_features)
+    logger.info(f"   ✅ Legacy features added")
+
+    scalping_engineer = ScalpingFeatureEngineer()
+    df_features = scalping_engineer.build_all_features(df_features)
+    logger.info(f"   ✅ Advanced features: {len(df_features.columns)} columns")
+
+    logger.info(f"✅ Features ready: {len(df_features.columns)} columns")
+    logger.info("")
+
+    # Validate strategy
+    try:
+        validator = StrategyValidator(config, args.model)
+    except Exception as e:
+        logger.error(f"❌ Failed to load model: {e}")
+        return
+
+    # Test different configurations
+    confidence_levels = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50]
+    tp_sl_configs = [
+        (2.0, 1.5),  # Original
+        (2.5, 1.0),  # Higher R:R
+        (3.0, 1.0),  # Very high R:R
+    ]
+
+    logger.info("=" * 80)
+    logger.info("🧪 TESTANDO DIFERENTES CONFIGURAÇÕES")
+    logger.info("=" * 80)
+    logger.info(f"Confidence levels: {confidence_levels}")
+    logger.info(f"TP/SL configs: {tp_sl_configs}")
+    logger.info(f"Total tests: {len(confidence_levels) * len(tp_sl_configs)}")
+    logger.info("")
+
+    results = []
+
+    for tp_mult, sl_mult in tp_sl_configs:
+        for min_conf in confidence_levels:
+            logger.info(f"Testing: TP={tp_mult}x SL={sl_mult}x Conf>={min_conf:.0%}...")
+            stats = validator.backtest_with_config(df_features.copy(), min_conf, tp_mult, sl_mult)
+            results.append(stats)
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📊 RESULTADOS COMPARATIVOS")
+    logger.info("=" * 80)
+    logger.info("")
+
+    # Print results table
+    print_results_table(results, args.days)
+
+    # Best configuration analysis
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("🏆 ANÁLISE DE MELHOR CONFIGURAÇÃO")
+    logger.info("=" * 80)
+    logger.info("")
+
+    analyze_best_config(results)
+
+
+def print_results_table(results, days):
+    """Print comparison table."""
+
+    header = (f"{'TP':<4} {'SL':<4} {'Conf':<5} | "
+              f"{'Trades':>6} {'WR':>6} | "
+              f"{'ROI':>8} {'ROI/yr':>8} | "
+              f"{'PF':>5} {'Sharpe':>6} {'DD':>7}")
+    logger.info(header)
+    logger.info("-" * len(header))
+
+    for r in results:
+        if r.get('total_trades', 0) > 0:
+            roi_yearly = r['roi'] / (days / 365)
+            line = (f"{r['tp_atr_mult']:<4.1f} "
+                   f"{r['sl_atr_mult']:<4.1f} "
+                   f"{r['min_confidence']*100:<5.0f} | "
+                   f"{r['total_trades']:>6.0f} "
+                   f"{r['win_rate']*100:>5.1f}% | "
+                   f"{r['roi']:>+7.1f}% "
+                   f"{roi_yearly:>+7.1f}% | "
+                   f"{r['profit_factor']:>5.2f} "
+                   f"{r['sharpe_ratio']:>6.2f} "
+                   f"{r['max_drawdown']:>6.1f}%")
+            logger.info(line)
+        else:
+            logger.info(f"{r['tp_atr_mult']:<4.1f} {r['sl_atr_mult']:<4.1f} "
+                       f"{r['min_confidence']*100:<5.0f} | No trades")
+
+    logger.info("")
+
+
+def analyze_best_config(results):
+    """Analyze and recommend best configuration."""
+
+    valid_results = [r for r in results if r.get('total_trades', 0) >= 20]
+
+    if not valid_results:
+        logger.info("❌ No valid results to analyze (need >= 20 trades)")
+        return
+
+    # Best by different metrics
+    best_roi = max(valid_results, key=lambda x: x['roi'])
+    best_sharpe = max(valid_results, key=lambda x: x['sharpe_ratio'])
+    best_wr = max(valid_results, key=lambda x: x['win_rate'])
+    min_dd = min(valid_results, key=lambda x: x['max_drawdown'])
+
+    logger.info("🎯 Melhor ROI:")
+    logger.info(f"   Config: TP {best_roi['tp_atr_mult']:.1f}x, SL {best_roi['sl_atr_mult']:.1f}x, Conf {best_roi['min_confidence']:.0%}")
+    logger.info(f"   ROI: {best_roi['roi']:+.2f}%")
+    logger.info(f"   Win Rate: {best_roi['win_rate']*100:.1f}%")
+    logger.info(f"   Trades: {best_roi['total_trades']}")
+    logger.info("")
+
+    logger.info("📈 Melhor Sharpe Ratio:")
+    logger.info(f"   Config: TP {best_sharpe['tp_atr_mult']:.1f}x, SL {best_sharpe['sl_atr_mult']:.1f}x, Conf {best_sharpe['min_confidence']:.0%}")
+    logger.info(f"   Sharpe: {best_sharpe['sharpe_ratio']:.2f}")
+    logger.info(f"   ROI: {best_sharpe['roi']:+.2f}%")
+    logger.info(f"   Trades: {best_sharpe['total_trades']}")
+    logger.info("")
+
+    logger.info("🎯 Melhor Win Rate:")
+    logger.info(f"   Config: TP {best_wr['tp_atr_mult']:.1f}x, SL {best_wr['sl_atr_mult']:.1f}x, Conf {best_wr['min_confidence']:.0%}")
+    logger.info(f"   Win Rate: {best_wr['win_rate']*100:.1f}%")
+    logger.info(f"   ROI: {best_wr['roi']:+.2f}%")
+    logger.info(f"   Trades: {best_wr['total_trades']}")
+    logger.info("")
+
+    logger.info("💪 Menor Drawdown:")
+    logger.info(f"   Config: TP {min_dd['tp_atr_mult']:.1f}x, SL {min_dd['sl_atr_mult']:.1f}x, Conf {min_dd['min_confidence']:.0%}")
+    logger.info(f"   Max DD: {min_dd['max_drawdown']:.2f}%")
+    logger.info(f"   ROI: {min_dd['roi']:+.2f}%")
+    logger.info(f"   Trades: {min_dd['total_trades']}")
+    logger.info("")
+
+    # Recommendation (weighted score)
+    logger.info("=" * 80)
+    logger.info("💡 RECOMENDAÇÃO (Weighted Score)")
+    logger.info("=" * 80)
+    logger.info("")
+
+    scores = []
+    for r in valid_results:
+        score = 0
+        score += (r['roi'] / max(x['roi'] for x in valid_results)) * 0.30
+        score += (r['sharpe_ratio'] / max(x['sharpe_ratio'] for x in valid_results)) * 0.25
+        score += (r['win_rate'] / max(x['win_rate'] for x in valid_results)) * 0.20
+        score += (1 - abs(r['max_drawdown']) / max(abs(x['max_drawdown']) for x in valid_results)) * 0.15
+        score += (r['total_trades'] / max(x['total_trades'] for x in valid_results)) * 0.10
+        scores.append((r, score))
+
+    if scores:
+        best = max(scores, key=lambda x: x[1])
+        r = best[0]
+
+        logger.info(f"🏆 Configuração Recomendada:")
+        logger.info(f"   TP: {r['tp_atr_mult']:.1f}x ATR")
+        logger.info(f"   SL: {r['sl_atr_mult']:.1f}x ATR")
+        logger.info(f"   MIN_ML_CONFIDENCE: {r['min_confidence']:.2f}")
+        logger.info("")
+        logger.info(f"📊 Métricas Esperadas:")
+        logger.info(f"   Total Trades: {r['total_trades']}")
+        logger.info(f"   Win Rate: {r['win_rate']*100:.1f}%")
+        logger.info(f"   ROI: {r['roi']:+.2f}%")
+        logger.info(f"   Sharpe: {r['sharpe_ratio']:.2f}")
+        logger.info(f"   Max DD: {r['max_drawdown']:.2f}%")
+        logger.info(f"   Profit Factor: {r['profit_factor']:.2f}")
+        logger.info(f"   Avg Confidence: {r['avg_ml_confidence']*100:.1f}%")
+        logger.info(f"   Long trades: {r['long_trades']} (WR: {r['long_wr']:.1f}%)")
+        logger.info(f"   Short trades: {r['short_trades']} (WR: {r['short_wr']:.1f}%)")
+        logger.info(f"   TP1 hits: {r['tp1_hit_count']:.0f} ({r['tp1_hit_count']/r['total_trades']*100:.1f}%)")
+        logger.info(f"   TP2 hits: {r['tp2_hit_count']:.0f} ({r['tp2_hit_count']/r['total_trades']*100:.1f}%)")
+
+    logger.info("")
+    logger.info("=" * 80)
+
+
+if __name__ == "__main__":
+    main()
