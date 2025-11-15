@@ -102,20 +102,48 @@ class MLBacktester:
         predictions = self.model.predict(X)
         proba = self.model.predict_proba(X)
 
-        # Convert predictions to signals
-        # Model outputs: 0=SHORT, 1=NEUTRAL, 2=LONG
-        df['ml_pred'] = predictions
-        df['ml_prob_short'] = proba[:, 0]
-        df['ml_prob_neutral'] = proba[:, 1]
-        df['ml_prob_long'] = proba[:, 2]
+        # Detect model type: Binary (2 classes) or Multiclass (3 classes)
+        n_classes = proba.shape[1]
 
-        # Signal: -1 (SHORT), 0 (NEUTRAL), 1 (LONG)
-        df['signal'] = 0
-        df.loc[df['ml_pred'] == 2, 'signal'] = 1   # LONG
-        df.loc[df['ml_pred'] == 0, 'signal'] = -1  # SHORT
+        if n_classes == 2:
+            # BINARY CLASSIFICATION (Master V2.0)
+            # Model outputs: 0=DOWN, 1=UP
+            logger.info(f"   Model type: BINARY (2 classes)")
+            df['ml_pred'] = predictions
+            df['ml_prob_short'] = proba[:, 0]  # Prob of DOWN (class 0)
+            df['ml_prob_neutral'] = 0.0        # No neutral class
+            df['ml_prob_long'] = proba[:, 1]   # Prob of UP (class 1)
 
-        # Confidence = max probability
-        df['ml_confidence'] = proba.max(axis=1)
+            # Signal: -1 (SHORT), 0 (NEUTRAL), 1 (LONG)
+            df['signal'] = 0
+            df.loc[df['ml_pred'] == 1, 'signal'] = 1   # LONG (class 1)
+            df.loc[df['ml_pred'] == 0, 'signal'] = -1  # SHORT (class 0)
+
+            # Confidence = probability of predicted class
+            df['ml_confidence'] = np.where(
+                df['ml_pred'] == 1,
+                df['ml_prob_long'],   # Confidence for LONG
+                df['ml_prob_short']   # Confidence for SHORT
+            )
+
+        elif n_classes == 3:
+            # MULTICLASS CLASSIFICATION (Old model)
+            # Model outputs: 0=NEUTRAL, 1=DOWN, 2=UP
+            logger.info(f"   Model type: MULTICLASS (3 classes)")
+            df['ml_pred'] = predictions
+            df['ml_prob_short'] = proba[:, 1]   # DOWN
+            df['ml_prob_neutral'] = proba[:, 0] # NEUTRAL
+            df['ml_prob_long'] = proba[:, 2]    # UP
+
+            # Signal: -1 (SHORT), 0 (NEUTRAL), 1 (LONG)
+            df['signal'] = 0
+            df.loc[df['ml_pred'] == 2, 'signal'] = 1   # LONG
+            df.loc[df['ml_pred'] == 1, 'signal'] = -1  # SHORT
+
+            # Confidence = max probability
+            df['ml_confidence'] = proba.max(axis=1)
+        else:
+            raise ValueError(f"Unexpected number of classes: {n_classes}. Expected 2 or 3.")
 
         # Filter by confidence
         df.loc[df['ml_confidence'] < min_confidence, 'signal'] = 0
