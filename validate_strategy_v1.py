@@ -448,13 +448,27 @@ def main():
     # Test different configurations - SCALPING optimized
     confidence_levels = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70]
     tp_sl_configs = [
-        # Scalping configs (quick in/out)
-        (0.6, 0.5),  # R:R = 1.20 (ultra-tight)
-        (0.7, 0.5),  # R:R = 1.40
-        (0.8, 0.5),  # R:R = 1.60
-        (1.0, 0.7),  # R:R = 1.43
-        (1.2, 0.7),  # R:R = 1.71
-        (1.5, 1.0),  # R:R = 1.50
+        # SL 1.5x (tight stop)
+        (0.6, 1.5),  # R:R = 0.40 (conservative, needs high WR)
+        (0.8, 1.5),  # R:R = 0.53
+        (1.0, 1.5),  # R:R = 0.67
+        (1.2, 1.5),  # R:R = 0.80
+        (1.5, 1.5),  # R:R = 1.00
+        (2.0, 1.5),  # R:R = 1.33
+
+        # SL 2.0x (moderate stop)
+        (0.8, 2.0),  # R:R = 0.40 (conservative)
+        (1.0, 2.0),  # R:R = 0.50
+        (1.2, 2.0),  # R:R = 0.60
+        (1.5, 2.0),  # R:R = 0.75
+        (2.0, 2.0),  # R:R = 1.00
+        (2.5, 2.0),  # R:R = 1.25
+
+        # SL 2.5x (wide stop)
+        (1.0, 2.5),  # R:R = 0.40 (very conservative)
+        (1.5, 2.5),  # R:R = 0.60
+        (2.0, 2.5),  # R:R = 0.80
+        (2.5, 2.5),  # R:R = 1.00
     ]
 
     logger.info("=" * 80)
