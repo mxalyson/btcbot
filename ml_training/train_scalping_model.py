@@ -276,6 +276,10 @@ class ScalpingModelTrainer:
             horizon=self.target_horizon
         )
 
+        # Define feature names se ainda não definido
+        if self.feature_names is None:
+            self.feature_names = list(X.columns)
+
         # Time series split
         tscv = TimeSeriesSplit(n_splits=self.n_splits)
 
