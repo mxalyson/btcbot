@@ -187,6 +187,23 @@ def get_position_size_usd(rest, symbol: str) -> float:
         logger.warning(f'get_position_size_usd: {e}')
     return 0.0
 
+def get_available_balance(rest) -> float:
+    """Get available balance in USDT for trading"""
+    try:
+        wallet = rest.get_wallet_balance(accountType='UNIFIED')
+        if wallet and wallet.get('retCode') == 0:
+            result = wallet.get('result', {})
+            accounts = result.get('list', [])
+            if accounts:
+                coins = accounts[0].get('coin', [])
+                for coin in coins:
+                    if coin.get('coin') == 'USDT':
+                        available = float(coin.get('availableToWithdraw', 0) or 0)
+                        return available
+    except Exception as e:
+        logger.warning(f'get_available_balance: {e}')
+    return 0.0
+
 def retry_with_backoff(func, max_retries: int = 3, initial_delay: float = 1.0, max_delay: float = 16.0):
     """
     Executa função com retry exponential backoff
@@ -808,6 +825,26 @@ class MasterLiveTrader:
         is_live = self.is_live_mode
 
         if self.is_live_mode:
+            # ✅ VERIFICAÇÃO PREVENTIVA DE SALDO
+            available_balance = get_available_balance(self.rest_client)
+            margin_needed = actual_size_usd * 1.2  # 20% de margem de segurança
+
+            if available_balance < margin_needed:
+                error_msg = f"⚠️ SALDO INSUFICIENTE - Ordem bloqueada preventivamente!\n\n"
+                error_msg += f"Bot: ETH Live V3\n"
+                error_msg += f"Saldo disponível: ${available_balance:,.2f} USDT\n"
+                error_msg += f"Margem necessária: ${margin_needed:,.2f} USDT\n"
+                error_msg += f"Tentando operar: ${actual_size_usd:,.2f} USDT\n"
+                error_msg += f"Symbol: {symbol}\n"
+                error_msg += f"Direção: {direction.upper()}\n\n"
+                error_msg += f"💡 Deposite mais fundos ou ajuste o tamanho das posições!"
+
+                logger.error(error_msg)
+                self.telegram.send_error(error_msg)
+                return
+
+            logger.info(f"✅ Saldo verificado: ${available_balance:,.2f} USDT disponível")
+
             try:
                 logger.info(f"💰 Sending LIVE {side} order to Bybit...")
 
@@ -870,11 +907,37 @@ class MasterLiveTrader:
                             logger.error(f"⚠️ Failed SL: {e}")
 
                 else:
-                    raise Exception("API error")
+                    # Captura erro específico
+                    ret_code = order.get('retCode', 'unknown')
+                    ret_msg = order.get('retMsg', 'API error')
+
+                    # Tratamento especial para saldo insuficiente
+                    if ret_code == 110007:
+                        available = get_available_balance(self.rest_client)
+                        error_detail = f"❌ SALDO INSUFICIENTE!\n\n"
+                        error_detail += f"Bot: ETH Live V3\n"
+                        error_detail += f"Erro: {ret_msg}\n"
+                        error_detail += f"Saldo disponível: ${available:,.2f} USDT\n"
+                        error_detail += f"Tentando operar: ${actual_size_usd:,.2f} USDT\n"
+                        error_detail += f"Direção: {direction.upper()}\n"
+                        error_detail += f"Symbol: {symbol}\n\n"
+                        error_detail += f"💡 Ação: Deposite mais fundos ou reduza o tamanho das posições!"
+
+                        logger.error(error_detail)
+                        self.telegram.send_error(error_detail)
+                        return
+                    else:
+                        raise Exception(f"API error (code {ret_code}): {ret_msg}")
 
             except Exception as e:
-                logger.error(f"❌ Failed order: {e}")
-                self.telegram.send_error(f"Failed: {e}")
+                error_detail = f"❌ BOT ETH - FALHA NA ORDEM\n\n"
+                error_detail += f"Erro: {str(e)}\n"
+                error_detail += f"Symbol: {symbol}\n"
+                error_detail += f"Direção: {direction.upper()}\n"
+                error_detail += f"Tamanho: ${actual_size_usd:,.2f} USDT"
+
+                logger.error(error_detail)
+                self.telegram.send_error(error_detail)
                 return
 
         # Salva posição
