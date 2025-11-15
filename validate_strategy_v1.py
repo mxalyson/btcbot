@@ -75,6 +75,11 @@ class StrategyValidator:
         self.config = config
         self.model_path = Path(model_path)
 
+        # Trading costs (Bybit spot)
+        self.taker_fee = 0.00055  # 0.055% taker fee
+        self.maker_fee = 0.0001   # 0.01% maker fee
+        self.slippage = 0.0002    # 0.02% slippage estimate
+
         if not self.model_path.exists():
             raise ValueError(f"Model not found: {model_path}")
 
@@ -246,7 +251,6 @@ class StrategyValidator:
 
             # TP1 (close 100%)
             if high >= position['tp1']:
-                logger.info(f"   ✅ TP1 HIT @ ${position['tp1']:.2f} | Closed 100%")
                 return 'take_profit'
 
         else:  # SHORT
@@ -256,7 +260,6 @@ class StrategyValidator:
 
             # TP1 (close 100%)
             if low <= position['tp1']:
-                logger.info(f"   ✅ TP1 HIT @ ${position['tp1']:.2f} | Closed 100%")
                 return 'take_profit'
 
         # Time exit (48h = 192 bars of 15min)
@@ -277,12 +280,26 @@ class StrategyValidator:
         entry = position['entry_price']
         direction = position['direction']
 
-        # Simple PnL calculation (100% position)
+        # Calculate raw PnL (before fees)
         if direction == 'long':
-            pnl_pct = ((exit_price - entry) / entry) * 100
+            raw_pnl_pct = ((exit_price - entry) / entry) * 100
         else:
-            pnl_pct = ((entry - exit_price) / entry) * 100
+            raw_pnl_pct = ((entry - exit_price) / entry) * 100
 
+        # Apply trading costs
+        # Entry: taker fee + slippage
+        # Exit: taker fee + slippage (SL hit) OR maker fee (TP limit order)
+        entry_cost = (self.taker_fee + self.slippage) * 100  # in %
+
+        if reason == 'take_profit':
+            # TP hit = limit order filled (maker fee)
+            exit_cost = (self.maker_fee + self.slippage) * 100
+        else:
+            # SL hit or time exit = market order (taker fee)
+            exit_cost = (self.taker_fee + self.slippage) * 100
+
+        total_cost = entry_cost + exit_cost
+        pnl_pct = raw_pnl_pct - total_cost
         pnl_amount = position['size'] * (pnl_pct / 100)
 
         return {
@@ -428,26 +445,16 @@ def main():
         logger.error(f"❌ Failed to load model: {e}")
         return
 
-    # Test different configurations
+    # Test different configurations - SCALPING optimized
     confidence_levels = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70]
     tp_sl_configs = [
-        # Original config
-        (2.0, 1.5),  # R:R = 1.33
-
-        # Higher R:R (tight SL)
-        (2.0, 1.0),  # R:R = 2.00
-        (2.5, 1.0),  # R:R = 2.50
-        (3.0, 1.0),  # R:R = 3.00
-        (3.5, 1.0),  # R:R = 3.50
-
-        # Conservative (wider SL)
-        (2.0, 2.0),  # R:R = 1.00
-        (2.5, 2.0),  # R:R = 1.25
-        (3.0, 2.0),  # R:R = 1.50
-
-        # Aggressive (very high TP)
-        (4.0, 1.0),  # R:R = 4.00
-        (5.0, 1.5),  # R:R = 3.33
+        # Scalping configs (quick in/out)
+        (0.6, 0.5),  # R:R = 1.20 (ultra-tight)
+        (0.7, 0.5),  # R:R = 1.40
+        (0.8, 0.5),  # R:R = 1.60
+        (1.0, 0.7),  # R:R = 1.43
+        (1.2, 0.7),  # R:R = 1.71
+        (1.5, 1.0),  # R:R = 1.50
     ]
 
     logger.info("=" * 80)
@@ -459,10 +466,15 @@ def main():
     logger.info("")
 
     results = []
+    total_tests = len(confidence_levels) * len(tp_sl_configs)
+    current_test = 0
 
     for tp_mult, sl_mult in tp_sl_configs:
         for min_conf in confidence_levels:
-            logger.info(f"Testing: TP={tp_mult}x SL={sl_mult}x Conf>={min_conf:.0%}...")
+            current_test += 1
+            # Simple progress indicator
+            if current_test % 8 == 0 or current_test == total_tests:
+                logger.info(f"Progress: {current_test}/{total_tests} tests completed...")
             stats = validator.backtest_with_config(df_features.copy(), min_conf, tp_mult, sl_mult)
             results.append(stats)
 
