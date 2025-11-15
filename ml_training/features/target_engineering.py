@@ -47,6 +47,56 @@ class TargetEngineer:
         # Cost total (entrada + saída)
         self.total_cost = (self.fees * 2) + (self.slippage * 2)
 
+    def create_master_scalper_target(self, df: pd.DataFrame, atr_col='atr') -> pd.DataFrame:
+        """
+        Target do MODELO ANTIGO (que funcionava!)
+
+        Sistema de VOTAÇÃO multi-horizon com threshold DINÂMICO baseado em ATR.
+
+        - Horizons: 4, 6, 8 bars (1h, 1.5h, 2h)
+        - Threshold dinâmico: 0.35% a 0.75% baseado em ATR
+        - Votação: 2/3 horizontes devem concordar
+        - Remove zona neutra (só sinais fortes!)
+        - Retorna: 1 (UP) ou 0 (DOWN) - BINÁRIO
+        """
+        df_target = df.copy()
+
+        # ATR-based dynamic threshold
+        atr = df_target[atr_col] if atr_col in df_target.columns else df_target['close'] * 0.005
+        atr_pct = (atr / df_target['close']) * 100
+
+        # Dynamic threshold: 0.35% a 0.75% baseado em volatilidade
+        dynamic_threshold = np.clip(atr_pct * 0.3, 0.35, 0.75)
+
+        # Multi-horizon voting
+        horizons = [4, 6, 8]  # 1h, 1.5h, 2h
+        votes = []
+
+        for horizon in horizons:
+            # Retorno futuro em %
+            future_returns = (df_target['close'].shift(-horizon) / df_target['close'] - 1) * 100
+
+            # Voto: 1.0 (UP), 0.5 (NEUTRAL), 0.0 (DOWN)
+            vote = pd.Series(0.5, index=df_target.index)
+            vote[future_returns > dynamic_threshold] = 1.0
+            vote[future_returns < -dynamic_threshold] = 0.0
+
+            votes.append(vote)
+
+        # Média dos votos
+        avg_vote = sum(votes) / len(votes)
+
+        # Target final: consenso forte necessário
+        target = pd.Series(np.nan, index=df_target.index)
+        target[avg_vote > 0.65] = 1  # UP: 2/3 concordam
+        target[avg_vote < 0.35] = 0  # DOWN: 2/3 concordam
+        # 0.35 <= avg_vote <= 0.65 = NEUTRAL (removido = np.nan)
+
+        df_target['target_master'] = target
+        df_target['vote_confidence'] = np.abs(avg_vote - 0.5) * 2
+
+        return df_target
+
     def create_all_targets(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Cria TODOS os targets para o modelo.
@@ -57,6 +107,10 @@ class TargetEngineer:
         print("🎯 Creating scalping targets...")
 
         df_target = df.copy()
+
+        # MASTER SCALPER target (modelo antigo que funciona!)
+        df_target = self.create_master_scalper_target(df_target)
+        print("  ✅ Master Scalper target (voting + dynamic threshold)")
 
         # 1. Multi-horizon binary targets
         df_target = self.create_multihorizon_targets(df_target)
@@ -272,8 +326,8 @@ class TargetEngineer:
         Prepara features (X) e target (y) para treinamento.
 
         Args:
-            target_type: 'classification', 'regression', ou 'risk_adjusted'
-            horizon: Qual horizonte usar (3, 5, ou 10 bars)
+            target_type: 'master', 'classification', 'regression', ou 'risk_adjusted'
+            horizon: Qual horizonte usar (3, 5, ou 10 bars) - ignored for 'master'
 
         Returns:
             X, y prontos para sklearn/lightgbm
@@ -281,7 +335,13 @@ class TargetEngineer:
         df_clean = df.copy()
 
         # Escolhe target
-        if target_type == 'classification':
+        if target_type == 'master':
+            # MASTER SCALPER target (modelo antigo que funciona!)
+            target_col = 'target_master'
+            # Binário: 0 (DOWN) ou 1 (UP)
+            y = df_clean[target_col].astype(int)
+
+        elif target_type == 'classification':
             target_col = f'target_{horizon}bars'
             # Converte -1, 0, 1 para 0, 1, 2 (LightGBM precisa >= 0)
             y = df_clean[target_col].map({-1: 0, 0: 1, 1: 2})

@@ -233,7 +233,14 @@ class ScalpingModelTrainer:
             model_config['metric'] = 'rmse'
             model_config.pop('num_class', None)
             model = lgb.LGBMRegressor(**model_config)
+        elif self.target_type == 'master':
+            # MASTER SCALPER: target binário (0=DOWN, 1=UP)
+            model_config['objective'] = 'binary'
+            model_config['metric'] = 'auc'
+            model_config.pop('num_class', None)
+            model = lgb.LGBMClassifier(**model_config)
         else:
+            # Multiclass (3 classes: SHORT/NEUTRAL/LONG)
             model = lgb.LGBMClassifier(**model_config)
 
         # Treina
