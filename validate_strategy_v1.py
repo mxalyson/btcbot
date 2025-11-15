@@ -497,11 +497,25 @@ def main():
         return
 
     # Test different configurations
-    confidence_levels = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50]
+    confidence_levels = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70]
     tp_sl_configs = [
-        (2.0, 1.5),  # Original
-        (2.5, 1.0),  # Higher R:R
-        (3.0, 1.0),  # Very high R:R
+        # Original config
+        (2.0, 1.5),  # R:R = 1.33
+
+        # Higher R:R (tight SL)
+        (2.0, 1.0),  # R:R = 2.00
+        (2.5, 1.0),  # R:R = 2.50
+        (3.0, 1.0),  # R:R = 3.00
+        (3.5, 1.0),  # R:R = 3.50
+
+        # Conservative (wider SL)
+        (2.0, 2.0),  # R:R = 1.00
+        (2.5, 2.0),  # R:R = 1.25
+        (3.0, 2.0),  # R:R = 1.50
+
+        # Aggressive (very high TP)
+        (4.0, 1.0),  # R:R = 4.00
+        (5.0, 1.5),  # R:R = 3.33
     ]
 
     logger.info("=" * 80)
