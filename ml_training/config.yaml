@@ -1,0 +1,182 @@
+# 🎛️ SCALPING MODEL TRAINING CONFIGURATION V2.0
+# Configuration for LightGBM scalping model training pipeline
+
+# ==============================================================================
+# DATA CONFIGURATION
+# ==============================================================================
+data:
+  symbol: "BTCUSDT"
+  timeframe: "15m"
+  lookback_days: 180  # 6 months recommended for scalping
+  test_size_pct: 0.15  # 15% for final test
+  n_splits: 5  # Walk-forward validation folds
+
+# ==============================================================================
+# TARGET CONFIGURATION
+# ==============================================================================
+target:
+  type: "classification"  # 'classification' or 'regression'
+  horizon: 5  # Bars ahead to predict (3, 5, or 10)
+
+  # TP/SL percentages (for target creation)
+  tp_pct: 0.003  # 0.3% take profit
+  sl_pct: 0.003  # 0.3% stop loss
+
+  # Multiple horizons to create
+  horizons: [3, 5, 10]
+
+  # Costs
+  fees: 0.0006  # 0.06% per side (Bybit taker)
+  slippage: 0.0001  # 0.01% slippage
+
+# ==============================================================================
+# MODEL CONFIGURATION
+# ==============================================================================
+model:
+  # Model type
+  name: "LightGBM"
+
+  # LightGBM Parameters (default/starting point)
+  params:
+    objective: "multiclass"
+    num_class: 3  # SHORT(0), NEUTRAL(1), LONG(2)
+    metric: "multi_logloss"
+    boosting_type: "gbdt"
+
+    # Tree parameters
+    num_leaves: 31
+    max_depth: 6
+    learning_rate: 0.05
+    n_estimators: 500
+
+    # Regularization
+    min_child_samples: 100
+    min_child_weight: 0.001
+    reg_alpha: 0.1  # L1
+    reg_lambda: 0.1  # L2
+    colsample_bytree: 0.8
+    subsample: 0.8
+    subsample_freq: 5
+
+    # Performance
+    num_threads: 4
+    verbose: -1
+
+    # Early stopping
+    early_stopping_rounds: 50
+
+# ==============================================================================
+# FEATURE ENGINEERING CONFIGURATION
+# ==============================================================================
+features:
+  # Use advanced scalping features
+  use_scalping_features: true
+
+  # Use legacy features (compatibility)
+  use_legacy_features: true
+
+  # Use order flow features (if data available)
+  use_orderflow: false
+
+  # Use trade flow features (if data available)
+  use_tradeflow: false
+
+  # Feature selection
+  min_importance_pct: 0.1  # Remove features < 0.1% importance
+
+# ==============================================================================
+# OPTIMIZATION CONFIGURATION (OPTUNA)
+# ==============================================================================
+optimization:
+  enabled: false  # Set true to run hyperparameter optimization
+  n_trials: 100
+  timeout: 3600  # seconds
+  metric: "accuracy"  # 'accuracy' or 'f1'
+
+  # Parameter search space
+  search_space:
+    num_leaves: [15, 127]
+    max_depth: [3, 12]
+    learning_rate: [0.001, 0.3]  # log scale
+    n_estimators: [50, 1000]
+    min_child_samples: [10, 300]
+    min_child_weight: [0.00001, 0.1]  # log scale
+    reg_alpha: [0.00000001, 10.0]  # log scale
+    reg_lambda: [0.00000001, 10.0]  # log scale
+    colsample_bytree: [0.3, 1.0]
+    subsample: [0.3, 1.0]
+    subsample_freq: [1, 10]
+
+# ==============================================================================
+# VALIDATION CONFIGURATION
+# ==============================================================================
+validation:
+  # Walk-forward validation
+  train_period_days: 120  # 4 months training window
+  test_period_days: 30    # 1 month test window
+  step_days: 15           # Resample every 15 days
+  min_train_samples: 1000
+
+  # Metrics to track
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1"
+    - "roc_auc"
+
+# ==============================================================================
+# BACKTESTING CONFIGURATION
+# ==============================================================================
+backtest:
+  initial_capital: 10000
+  risk_per_trade: 0.02  # 2%
+  fees_pct: 0.0006  # 0.06%
+  slippage_pct: 0.0001  # 0.01%
+
+  # Risk management
+  atr_mult_sl: 1.5
+  atr_mult_tp: 1.0
+
+  # Limits
+  max_trades_per_day: 10
+  min_confidence: 0.30  # Minimum model confidence to trade
+
+# ==============================================================================
+# OUTPUT CONFIGURATION
+# ==============================================================================
+output:
+  # Directories
+  models_dir: "ml_training/outputs/models"
+  metrics_dir: "ml_training/outputs/metrics"
+  plots_dir: "ml_training/outputs/plots"
+
+  # Model naming
+  model_name_format: "scalping_model_{symbol}_{timeframe}_{timestamp}.pkl"
+
+  # Save options
+  save_feature_importance: true
+  save_validation_results: true
+  save_plots: true
+
+# ==============================================================================
+# QUALITY THRESHOLDS (for model acceptance)
+# ==============================================================================
+quality:
+  min_accuracy: 0.55  # 55%
+  min_precision_long: 0.60  # 60%
+  min_recall_long: 0.40  # 40%
+  min_f1_long: 0.45  # 45%
+  max_drawdown_pct: 20.0  # 20%
+  min_sharpe: 1.0
+  min_win_rate: 0.50  # 50%
+  min_profit_factor: 1.2
+
+# ==============================================================================
+# LOGGING CONFIGURATION
+# ==============================================================================
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  save_to_file: true
+  log_file: "ml_training/outputs/training.log"
