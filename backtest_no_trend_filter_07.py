@@ -30,8 +30,7 @@ except:
 
 # Config
 SYMBOL = 'BTCUSDT'  # Símbolo a ser testado (ex: 'BTCUSDT', 'ETHUSDT', 'SOLUSDT')
-TIMEFRAME = '15m'   # Período das velas (ex: '1m', '5m', '15m', '1h', '4h', '1d')
-LOOKBACK_DAYS = 90  # Quantidade de dias históricos
+LOOKBACK_DAYS = 90  # Quantidade de dias históricos (ex: 30, 60, 90, 180, 365)
 
 INITIAL_CAPITAL = 300.0
 RISK_PER_TRADE = 0.02
@@ -477,7 +476,6 @@ def main():
 
     print("\n🔬 BACKTEST SEM FILTRO DE TENDÊNCIA + TRAILING STOP")
     print(f"Símbolo: {SYMBOL}")
-    print(f"Timeframe: {TIMEFRAME}")
     print(f"Capital: ${INITIAL_CAPITAL}")
     print(f"Período: {LOOKBACK_DAYS} dias")
     print(f"TPs: {TP_MULTS['tp1']}x, {TP_MULTS['tp2']}x, {TP_MULTS['tp3']}x ATR")
@@ -503,8 +501,8 @@ def main():
             dm = DataManager(rest_client)
             fs = FeatureStore(config)
 
-            logger.info(f"📥 Buscando {LOOKBACK_DAYS} dias de {SYMBOL} ({TIMEFRAME})...")
-            df = dm.get_data(SYMBOL, TIMEFRAME, LOOKBACK_DAYS)
+            logger.info(f"📥 Buscando {LOOKBACK_DAYS} dias de {SYMBOL}...")
+            df = dm.get_data(SYMBOL, '15m', LOOKBACK_DAYS)
 
             if df is not None and not df.empty:
                 logger.info(f"✅ {len(df)} candles")
