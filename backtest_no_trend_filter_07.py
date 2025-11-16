@@ -31,6 +31,7 @@ except:
 # Config
 SYMBOL = 'BTCUSDT'  # Símbolo a ser testado (ex: 'BTCUSDT', 'ETHUSDT', 'SOLUSDT')
 LOOKBACK_DAYS = 90  # Quantidade de dias históricos (ex: 30, 60, 90, 180, 365)
+MODEL_PATH = 'storage/models/ml_model_master_scalper_365d.pkl'  # Caminho do modelo .pkl
 
 INITIAL_CAPITAL = 300.0
 RISK_PER_TRADE = 0.02
@@ -476,6 +477,7 @@ def main():
 
     print("\n🔬 BACKTEST SEM FILTRO DE TENDÊNCIA + TRAILING STOP")
     print(f"Símbolo: {SYMBOL}")
+    print(f"Modelo: {MODEL_PATH}")
     print(f"Capital: ${INITIAL_CAPITAL}")
     print(f"Período: {LOOKBACK_DAYS} dias")
     print(f"TPs: {TP_MULTS['tp1']}x, {TP_MULTS['tp2']}x, {TP_MULTS['tp3']}x ATR")
@@ -518,9 +520,8 @@ def main():
         print("❌ Dados não disponíveis")
         return
 
-    model_path = 'storage/models/ml_model_master_scalper_365d.pkl'
-    if not Path(model_path).exists():
-        print(f"❌ Modelo não encontrado: {model_path}")
+    if not Path(MODEL_PATH).exists():
+        print(f"❌ Modelo não encontrado: {MODEL_PATH}")
         return
 
     results = []
@@ -530,7 +531,7 @@ def main():
         print(f"Confidence: {confidence:.0%}")
         print(f"{'='*60}")
 
-        bt = BacktestEngine(model_path, confidence)
+        bt = BacktestEngine(MODEL_PATH, confidence)
         bt.run(df)
         stats = bt.get_stats()
         results.append(stats)
