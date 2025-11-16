@@ -29,12 +29,15 @@ except:
     HAS_MODULES = False
 
 # Config
+SYMBOL = 'BTCUSDT'  # Símbolo a ser testado (ex: 'BTCUSDT', 'ETHUSDT', 'SOLUSDT')
+TIMEFRAME = '15m'   # Período das velas (ex: '1m', '5m', '15m', '1h', '4h', '1d')
+LOOKBACK_DAYS = 90  # Quantidade de dias históricos
+
 INITIAL_CAPITAL = 300.0
 RISK_PER_TRADE = 0.02
 ATR_MULT_SL = 1.5
 FEE_RATE = 0.0006
 SLIPPAGE = 0.0001
-LOOKBACK_DAYS = 90
 
 # TPs otimizados - TP1 em 0.8x ATR
 TP_MULTS = {
@@ -473,6 +476,8 @@ def main():
     global logger
 
     print("\n🔬 BACKTEST SEM FILTRO DE TENDÊNCIA + TRAILING STOP")
+    print(f"Símbolo: {SYMBOL}")
+    print(f"Timeframe: {TIMEFRAME}")
     print(f"Capital: ${INITIAL_CAPITAL}")
     print(f"Período: {LOOKBACK_DAYS} dias")
     print(f"TPs: {TP_MULTS['tp1']}x, {TP_MULTS['tp2']}x, {TP_MULTS['tp3']}x ATR")
@@ -498,8 +503,8 @@ def main():
             dm = DataManager(rest_client)
             fs = FeatureStore(config)
 
-            logger.info(f"📥 Buscando {LOOKBACK_DAYS} dias...")
-            df = dm.get_data('BTCUSDT', '15m', LOOKBACK_DAYS)
+            logger.info(f"📥 Buscando {LOOKBACK_DAYS} dias de {SYMBOL} ({TIMEFRAME})...")
+            df = dm.get_data(SYMBOL, TIMEFRAME, LOOKBACK_DAYS)
 
             if df is not None and not df.empty:
                 logger.info(f"✅ {len(df)} candles")
